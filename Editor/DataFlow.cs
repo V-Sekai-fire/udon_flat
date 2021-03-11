@@ -21,9 +21,11 @@ public class DataFlowAnalyzer {
 	public HashSet<string> variables;
 	public int[] writeUseCount;
 	public void Analyze() {
+		var symbols = program.SymbolTable.GetSymbols();
+		var exportedSymbols = program.SymbolTable.GetExportedSymbols();
 		writeUseCount = new int[ir.irCode.Length+1];
-		variables = new HashSet<string>(program.SymbolTable.GetExportedSymbols());
-		volatiles = new HashSet<string>(program.SymbolTable.GetExportedSymbols());
+		variables = new HashSet<string>(exportedSymbols);
+		volatiles = new HashSet<string>(exportedSymbols);
 
 		var writers = new Dictionary<string, int>();
 		for(int line=0; line<ir.irCode.Length; line++) {
@@ -54,6 +56,23 @@ public class DataFlowAnalyzer {
 					writeUseCount[writer] ++;
 				else
 					volatiles.Add(instr.args[i]);
+			}
+		}
+
+		// TODO
+		var nodeDefs = UdonEditorManager.Instance.GetNodeDefinitions();
+		foreach(var nodeDef in nodeDefs) {
+			var m = Regex.Match(nodeDef.fullName, @"^Event_(\w+)");
+			if(m.Success) {
+				var name = m.Groups[1].Value;
+				foreach(var p in nodeDef.parameters) {
+					if(p.name == null)
+						continue;
+					var paramSymbol = name.Substring(0,1).ToLowerInvariant() + name.Substring(1)
+						+ p.name.Substring(0,1).ToUpperInvariant() + p.name.Substring(1);
+					variables.Add(paramSymbol);
+					volatiles.Add(paramSymbol);
+				}
 			}
 		}
 	}

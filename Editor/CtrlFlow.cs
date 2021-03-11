@@ -17,18 +17,6 @@ public enum CtrlFlowType {
 public class CtrlFlowAnalyzer {
 	public IUdonProgram program;
 	public IRGen ir;
-	void CollapseJumps() {
-		for(int line=ir.irCode.Length-1; line>=0; line--) {
-			var instr = ir.irCode[line];
-			if(instr.opcode == Opcode.JUMP) {
-				var jumpInstr = ir.irCode[ir.irLineFromAddr[instr.arg0]];
-				if((jumpInstr.opcode == Opcode.JUMP || jumpInstr.opcode == Opcode.EXIT) && jumpInstr.args == null) {
-					instr.opcode = jumpInstr.opcode;
-					instr.arg0 = jumpInstr.arg0;
-				}
-			}
-		}
-	}	
 	
 	public CtrlFlowType[] types;
 
@@ -137,13 +125,11 @@ public class CtrlFlowAnalyzer {
 				jumpTargets.Add(line);
 			if(instr.opcode == Opcode.CALL || instr.opcode == Opcode.JUMP)
 				jumpTargets.Add(ir.irLineFromAddr[instr.arg0]);
-			if(instr.opcode == Opcode.CALL || instr.opcode == Opcode.EXTERN && reUdonCall.IsMatch(instr.arg0))
+			if(instr.opcode == Opcode.CALL || (instr.opcode == Opcode.EXTERN && reUdonCall.IsMatch(instr.arg0)))
 				jumpTargets.Add(line+1);
 		}
 	}
 	public void Analyze() {
-		CollapseJumps();
-
 		types = new CtrlFlowType[ir.irCode.Length];
 		CreateEntries();
 		CreateLoops();

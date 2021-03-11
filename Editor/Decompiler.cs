@@ -15,6 +15,7 @@ public class Symbol {
 	public System.Type type;
 	public object value;
 
+	public System.Type caster;
 	public bool exported;
 	public string prettyName;
 
@@ -30,21 +31,39 @@ public class Symbol {
 		var m = Regex.Match(name, @"^__\d+_(.+)_\w+$");
 		if(m.Success)
 			prettyName = $"_{m.Groups[1].Value}_{addr}";
+
+		if(type.IsArray && value != null)
+			caster = getCaster(value);
 	}
 	public override string ToString() {
 		return prettyName;
 	}
 	public CodeTypeMember FormatDefinition() {
 		var field = new CodeMemberField(type, prettyName);
-		if(exported)
-			field.Attributes = MemberAttributes.Public;
+		field.Attributes = exported ? MemberAttributes.Public : 0;
 		if(!(value == null || (type.IsValueType && System.Activator.CreateInstance(type).Equals(value))))
 			field.InitExpression = ExprGen.Value(value);
 		return field;
 	}
+
+	static System.Type getCaster(object value) {
+		var arr = (System.Array)value;
+		var n = arr.GetLength(0);
+		if(n == 0)
+			return null;
+		var elemType = arr.GetValue(0).GetType();
+		if(!elemType.IsEnum)
+			return null;
+		for(int i=0; i<n; i++)
+			if(!System.Enum.ToObject(elemType, i).Equals(arr.GetValue(i)))
+				return null;
+		return elemType;
+	}
 }
 public class Decompiler {
 	public IUdonProgram program;
+	public string name = "Unnamed";
+
 	public static UdonNodeDefinition GetNodeDefinition(string fullName) {
 		return UdonEditorManager.Instance.GetNodeDefinition(fullName);
 	}
@@ -124,11 +143,19 @@ public class Decompiler {
 	}
 	void SimplifyStatement(int line) {
 		var assign = statements[line] as CodeAssignStatement;
-		if(assign != null && getAssignLeftUsageCount(line, assign.Left) == 0) {
-			if(assign.Right is CodeVariableReferenceExpression || assign.Right is CodePrimitiveExpression)
-					statements[line] = null;
-				else
-					statements[line] = new CodeExpressionStatement(assign.Right);
+		if(assign != null) {
+			var indexer = assign.Right as CodeArrayIndexerExpression;
+			if(indexer != null && indexer.TargetObject is CodeVariableReferenceExpression) {
+				var symbol = symbolFromExpr[(CodeVariableReferenceExpression)indexer.TargetObject];
+				if(symbol.caster != null && indexer.Indices.Count == 1)
+					 assign.Right = new CodeCastExpression(symbol.caster, indexer.Indices[0]);
+			}
+			if(getAssignLeftUsageCount(line, assign.Left) == 0) {
+				if(assign.Right is CodeVariableReferenceExpression || assign.Right is CodePrimitiveExpression)
+						statements[line] = null;
+					else
+						statements[line] = new CodeExpressionStatement(assign.Right);
+			}
 		}
 	}
 
@@ -154,17 +181,22 @@ public class Decompiler {
 				for(int i=0; i<paramExprs.Length; i++)
 					if(paramExprs[i] == null)
 						paramExprs[i] = symbolExprs[instr.args[i]];
-				statements[line] = ExprGen.Extern(nodeDef, paramExprs);
+				statements[line] = StatGen.Extern(nodeDef, paramExprs);
+				// COPY may produce casting
+				if(instr.arg0 == StatGen.COPY) {
+					var assign = (CodeAssignStatement)statements[line];
+					var sourceType = symbolFromName[instr.args[0]].type;
+					var targetType = symbolFromName[instr.args[1]].type;
+					if(!targetType.IsAssignableFrom(sourceType))
+						assign.Right = new CodeCastExpression(targetType, assign.Right);
+				}
 				SimplifyStatement(line);
 
 			} else if(instr.opcode == Opcode.CALL) {
 				Debug.Assert(instr.args == null);
 				statements[line] = new CodeExpressionStatement(new CodeDelegateInvokeExpression(
 					new CodeVariableReferenceExpression(ctrlFlow.entries[ir.irLineFromAddr[instr.arg0]])));
-			} else if(instr.opcode == Opcode.RETURN) {
-				Debug.Assert(instr.args == null);
-				statements[line] = new CodeMethodReturnStatement();
-			} else if(instr.opcode == Opcode.JUMP) {
+			} else if(instr.opcode == Opcode.JUMP || instr.opcode == Opcode.EXIT || instr.opcode == Opcode.RETURN) {
 				var paramExprs = new CodeExpression[]{new CodePrimitiveExpression(true)};
 				if(instr.args != null) {
 					paramExprs[0] = symbolExprs[instr.args[0]];
@@ -175,22 +207,22 @@ public class Decompiler {
 				// Debug.Log($"paramExprs[0]={paramExprs[0]}");
 				if(ctrlFlow.types[line] == CtrlFlowType.Loop) {
 					statements[line] = new CodeSnippetStatement($"}} while({ExprGen.GenerateCode(paramExprs[0])});");
-				}
-				else if(ctrlFlow.types[line] == CtrlFlowType.If) {
+				} else if(ctrlFlow.types[line] == CtrlFlowType.If) {
 					paramExprs[0] = ExprGen.Negate(paramExprs[0]);
 					statements[line] = new CodeSnippetStatement($"if({ExprGen.GenerateCode(paramExprs[0])}) {{");
-				}
-				else if(ctrlFlow.types[line] == CtrlFlowType.Else) {
+				} else if(ctrlFlow.types[line] == CtrlFlowType.Else) {
 					statements[line] = new CodeSnippetStatement($"}} else {{");
-				}
-				else {
+				} else {
 					CodeStatement stat; 
 					if(ctrlFlow.types[line] == CtrlFlowType.Break)
 						stat = new CodeSnippetStatement("break;");
 					else if(ctrlFlow.types[line] == CtrlFlowType.Continue)
 						stat = new CodeSnippetStatement("continue;");
+					else if(instr.opcode == Opcode.EXIT || instr.opcode == Opcode.RETURN)
+						stat = new CodeMethodReturnStatement();
 					else
 						stat = new CodeGotoStatement(ctrlFlow.labels[ir.irLineFromAddr[instr.arg0]]);
+
 					var prim = paramExprs[0] as CodePrimitiveExpression;
 					if(prim != null && prim.Value is bool) {
 						if((bool)prim.Value)
@@ -199,23 +231,6 @@ public class Decompiler {
 						statements[line] = new CodeSnippetStatement($"if({ExprGen.GenerateCode(paramExprs[0])})\r\n\t{ExprGen.GenerateCode(stat).Trim()}");
 					}
 				}
-			} else if(instr.opcode == Opcode.EXIT) {
-				var paramExprs = new CodeExpression[]{new CodePrimitiveExpression(true)};
-				if(instr.args != null) {
-					paramExprs[0] = symbolExprs[instr.args[0]];
-					SimplifyInParameters(line, paramExprs);
-					if(instr.args[1] == "FALSE")
-						paramExprs[0] = ExprGen.Negate(paramExprs[0]);
-				}
-				var stat = new CodeMethodReturnStatement();
-				var prim = paramExprs[0] as CodePrimitiveExpression;
-				if(prim != null && prim.Value is bool) {
-					if((bool)prim.Value)
-						statements[line] = stat;
-				} else {
-					statements[line] = new CodeSnippetStatement($"if({ExprGen.GenerateCode(paramExprs[0])})\r\n\t{ExprGen.GenerateCode(stat).Trim()}");
-				}
-				
 			} else {
 				Debug.LogError(instr);
 			}
@@ -234,9 +249,7 @@ public class Decompiler {
 			});
 		}
 
-		writer.WriteLine("using UnityEngine;");
-		writer.WriteLine("using UdonSharp;");
-		writer.WriteLine("public class Test : UdonSharpBehaviour {");
+		writer.WriteLine($"public class {name} : UdonSharp.UdonSharpBehaviour {{");
 
 		var entry = default(string);
 		var tab = "\t";
@@ -276,7 +289,7 @@ public class Decompiler {
 					if(string.IsNullOrEmpty(stat))
 						continue;
 					writer.Write(tab);
-					writer.Write(stat);
+					writer.WriteLine(stat.Trim('\r', '\n'));
 				}
 				if(ctrlFlow.types[line] == CtrlFlowType.If || ctrlFlow.types[line] == CtrlFlowType.Else) {
 					tab += "\t";

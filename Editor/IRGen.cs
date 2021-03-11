@@ -9,8 +9,9 @@ using VRC.Udon.Editor;
 namespace SharperUdon {
 public enum Opcode {
 	EXTERN, // arg0: signature, args: parameters
-	JUMP, EXIT, // arg0: address (JUMP only), args: condition
-	CALL, RETURN, // arg0: address (CALL only)
+	CALL, // arg0: address
+	JUMP, // arg0: address, args: condition
+	EXIT, RETURN, // args: condition
 }
 public class Instruction {
 	public string addr;
@@ -64,7 +65,7 @@ public class IRGen {
 				var sourceName = stack.Pop();
 				if(sourceName != targetName) // skip no-op
 					translated[line] = new Instruction{addr=addr, // express COPY as EXTERN
-						opcode=Opcode.EXTERN, arg0=ExprGen.COPY, args=new[]{sourceName, targetName}};
+						opcode=Opcode.EXTERN, arg0=StatGen.COPY, args=new[]{sourceName, targetName}};
 			} else if(opcode == "EXTERN") {
 				var signature = instr[2].Trim('"');
 				var nodeDef = UdonEditorManager.Instance.GetNodeDefinition(signature);
@@ -126,7 +127,7 @@ public class IRGen {
 
 	public Instruction[] irCode;
 	public Dictionary<string, int> irLineFromAddr;
-	void Collapse() {
+	void CollapseLines() {
 		var irLine = new int[translated.Length];
 		irCode = new Instruction[translated.Count(x => x != null)];
 		for(int i=irCode.Length, line=translated.Length-1; line>=0; line--) {
@@ -138,9 +139,22 @@ public class IRGen {
 		for(int line=0; line<rawCode.Length; line++)
 			irLineFromAddr[rawCode[line][0]] = irLine[line];
 	}
+	void CollapseJumps() {
+		for(int line=irCode.Length-1; line>=0; line--) {
+			var instr = irCode[line];
+			if(instr.opcode == Opcode.JUMP) {
+				var jumpInstr = irCode[irLineFromAddr[instr.arg0]];
+				if((jumpInstr.opcode == Opcode.JUMP || jumpInstr.opcode == Opcode.EXIT || jumpInstr.opcode == Opcode.RETURN) && jumpInstr.args == null) {
+					instr.opcode = jumpInstr.opcode;
+					instr.arg0 = jumpInstr.arg0;
+				}
+			}
+		}
+	}	
 	public void Generate() {
 		Translate();
-		Collapse();
+		CollapseLines();
+		CollapseJumps();
 	}
 
 	public string GetRawCode() {
