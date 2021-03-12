@@ -18,8 +18,10 @@ public class Symbol {
 	public System.Type caster;
 	public bool exported;
 	public string prettyName;
+	public UdonSyncInterpolationMethod? sync;
+	public CodeExpression constExpr;
 
-	public Symbol(string name, IUdonSymbolTable table, IUdonHeap heap) {
+	public Symbol(string name, IUdonSymbolTable table, IUdonHeap heap, IUdonSyncMetadataTable syncTable, bool isConst) {
 		this.name = name;
 		addr = table.GetAddressFromSymbol(name);
 		type = table.GetSymbolType(name);
@@ -32,17 +34,39 @@ public class Symbol {
 		if(m.Success)
 			prettyName = $"_{m.Groups[1].Value}_{addr}";
 
+		if(isConst) {
+			constExpr = ExprGen.Ref(value);
+			var valueStr = value as string;
+			if(valueStr != null && valueStr.Contains('\n'))
+				constExpr = null;
+		}
+
 		if(type.IsArray && value != null)
 			caster = getCaster(value);
+
+		var syncProps = syncTable.GetSyncMetadataFromSymbol(name)?.Properties;
+		if(syncProps != null)
+			sync = syncProps[0].InterpolationAlgorithm;
 	}
 	public override string ToString() {
 		return prettyName;
 	}
 	public CodeTypeMember FormatDefinition() {
 		var field = new CodeMemberField(type, prettyName);
-		field.Attributes = exported ? MemberAttributes.Public : 0;
+		field.Attributes = MemberAttributes.Final;
+		if(exported)
+			field.Attributes |= MemberAttributes.Public;
+		else
+			field.Attributes |= MemberAttributes.Private;
 		if(!(value == null || (type.IsValueType && System.Activator.CreateInstance(type).Equals(value))))
 			field.InitExpression = ExprGen.Value(value);
+		if(sync != null) {
+			field.CustomAttributes = new CodeAttributeDeclarationCollection();
+			field.CustomAttributes.Add(new CodeAttributeDeclaration("UdonSharp.UdonSynced",
+				new CodeAttributeArgument(new CodePropertyReferenceExpression(
+					new CodeTypeReferenceExpression("UdonSharp.UdonSyncMode"),
+					sync.Value.ToString()))));
+		}
 		return field;
 	}
 
@@ -50,6 +74,8 @@ public class Symbol {
 		var arr = (System.Array)value;
 		var n = arr.GetLength(0);
 		if(n == 0)
+			return null;
+		if(arr.GetValue(0) == null)
 			return null;
 		var elemType = arr.GetValue(0).GetType();
 		if(!elemType.IsEnum)
@@ -78,11 +104,13 @@ public class Decompiler {
 		var heap = program.Heap;
 		var symbolTable = program.SymbolTable;
 		var symbolNames = symbolTable.GetSymbols().ToArray();
+		var syncTable = program.SyncMetadataTable;
 
 		symbols = new Symbol[symbolNames.Length];
 		symbolFromName = new Dictionary<string, Symbol>();
 		for(int i=0; i<symbolNames.Length; i++) {
-			var symbol = new Symbol(symbolNames[i], symbolTable, heap);
+			var symbol = new Symbol(symbolNames[i],
+				symbolTable, heap, syncTable, !dataFlow.variables.Contains(symbolNames[i]));
 			symbols[i] = symbol;
 			symbolFromName[symbol.name] = symbol;
 		}
@@ -106,42 +134,46 @@ public class Decompiler {
 		var assignVar = assignLeft as CodeVariableReferenceExpression;
 		if(assignVar == null)
 			return 2;
-		var symbol = symbolFromExpr[assignVar];
-		if(dataFlow.volatiles.Contains(symbol.name))
-			return 2;
-		return dataFlow.writeUseCount[line];
+		var linePorts = dataFlow.ports[line];
+		return linePorts[linePorts.Length-1].outputRef;
 	}
 
 	void SimplifyInParameters(int line, CodeExpression[] paramExprs) {
+		// return;
 		for(int i=0; i<paramExprs.Length; i++) {
 			var refExpr = paramExprs[i] as CodeVariableReferenceExpression;
 			if(refExpr == null)
 				continue;
 			var symbol = symbolFromExpr[refExpr];
-			if(!dataFlow.variables.Contains(symbol.name) && !symbol.type.IsArray) {
-				paramExprs[i] = ExprGen.Value(symbol.value);
-			}
+			if(symbol.constExpr != null)
+				paramExprs[i] = symbol.constExpr;
 		}
-		for(int prevLine=line-1; prevLine>=0; prevLine--) {
-			if(statements[prevLine] == null)
-				continue;
-			var prevAssign = statements[prevLine] as CodeAssignStatement;
-			if(prevAssign == null)
-				break;
-			if(getAssignLeftUsageCount(prevLine, prevAssign.Left) > 1)
-				break;
-			var idx = System.Array.IndexOf(paramExprs, prevAssign.Left);
-			if(idx < 0)
-				break;
-			
+		
+		for(int prevLine=line-1; prevLine>=0 && !ctrlFlow.jumpTargets.Contains(prevLine+1); prevLine--) {
+			if(statements[prevLine] != null) {
+				var prevAssign = statements[prevLine] as CodeAssignStatement;
+				if(prevAssign == null)
+					break;
 
-			paramExprs[idx] = prevAssign.Right;
-			statements[prevLine] = null;
-			if(ctrlFlow.entries[prevLine] != null || ctrlFlow.labels[prevLine] != null)
-				break;
+				// Debug.Log($"{line} try merge {ExprGen.GenerateCode(prevAssign)} into {string.Join(", ", paramExprs.Select(x=>$"{x}"))}");
+				if(getAssignLeftUsageCount(prevLine, prevAssign.Left) > 1) {
+					// Debug.Log("getAssignLeftUsageCount fail");
+					break;
+				}
+				var idx = System.Array.IndexOf(paramExprs, prevAssign.Left);
+				if(idx < 0) {
+					// Debug.Log("IndexOf fail");
+					break;
+				}
+				// Debug.Log("OK");
+
+				paramExprs[idx] = prevAssign.Right;
+				statements[prevLine] = null;
+			}
 		}
 	}
 	void SimplifyStatement(int line) {
+		// return;
 		var assign = statements[line] as CodeAssignStatement;
 		if(assign != null) {
 			var indexer = assign.Right as CodeArrayIndexerExpression;
@@ -151,10 +183,7 @@ public class Decompiler {
 					 assign.Right = new CodeCastExpression(symbol.caster, indexer.Indices[0]);
 			}
 			if(getAssignLeftUsageCount(line, assign.Left) == 0) {
-				if(assign.Right is CodeVariableReferenceExpression || assign.Right is CodePrimitiveExpression)
-						statements[line] = null;
-					else
-						statements[line] = new CodeExpressionStatement(assign.Right);
+				statements[line] = new CodeExpressionStatement(assign.Right);
 			}
 		}
 	}
@@ -173,6 +202,8 @@ public class Decompiler {
 		for(int line=0; line<ir.irCode.Length; line++) {
 			var instr = ir.irCode[line];
 			if(instr.opcode == Opcode.EXTERN) {
+				if(dataFlow.port0[line].outputRef == 0)
+					continue;
 				var nodeDef = GetNodeDefinition(instr.arg0);
 				var paramExprs = instr.args.Select((s,i) =>
 					nodeDef.parameters[i].parameterType == UdonNodeParameter.ParameterType.IN ?
@@ -201,10 +232,8 @@ public class Decompiler {
 				if(instr.args != null) {
 					paramExprs[0] = symbolExprs[instr.args[0]];
 					SimplifyInParameters(line, paramExprs);
-					if(instr.args[1] == "FALSE")
-						paramExprs[0] = ExprGen.Negate(paramExprs[0]);
+					paramExprs[0] = ExprGen.Negate(paramExprs[0]);
 				}
-				// Debug.Log($"paramExprs[0]={paramExprs[0]}");
 				if(ctrlFlow.types[line] == CtrlFlowType.Loop) {
 					statements[line] = new CodeSnippetStatement($"}} while({ExprGen.GenerateCode(paramExprs[0])});");
 				} else if(ctrlFlow.types[line] == CtrlFlowType.If) {
@@ -266,11 +295,31 @@ public class Decompiler {
 				tab = tab.Substring(1); writer.Write(tab); writer.WriteLine("}");
 			}
 			if(ctrlFlow.entries[line] != null) {
+				var methodExpr = new CodeMemberMethod();
+				methodExpr.Name = ctrlFlow.entries[line];
+				methodExpr.Attributes = MemberAttributes.Final;
+				if(program.EntryPoints.HasExportedSymbol(methodExpr.Name))
+					methodExpr.Attributes |= MemberAttributes.Public;
+				else
+					methodExpr.Attributes |= MemberAttributes.Private;
+
+				if(dataFlow.eventFromEntry.ContainsKey(methodExpr.Name)) {
+					methodExpr.Attributes &= ~MemberAttributes.Final;
+					methodExpr.Attributes |= MemberAttributes.Override;
+					var ev = dataFlow.eventFromEntry[methodExpr.Name];
+					for(int i=0; i<ev.symbolNames.Length; i++)
+						methodExpr.Parameters.Add(new CodeParameterDeclarationExpression(
+							ev.nodeDef.parameters[i].type, ev.symbolNames[i]));
+				}
 				if(entry != null) {
+					if(ctrlFlow.entryContinue[line]) {
+						writer.Write(tab);
+						writer.WriteLine($"{ctrlFlow.entries[line]}();");
+					}
 					tab = tab.Substring(1); writer.Write(tab); writer.WriteLine("}");
 				}
 				writer.Write(tab);
-				writer.Write($"void {ctrlFlow.entries[line]}()");
+				writer.Write(ExprGen.GenerateCode(methodExpr).Split('{')[0]);
 				writer.WriteLine(" {"); tab += "\t";
 				entry = ctrlFlow.entries[line];
 			}

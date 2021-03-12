@@ -85,15 +85,8 @@ public class IRGen {
 					stack.Pop();
 				} else {
 					var cond = default(string[]);
-					if(opcode == "JUMP_IF_FALSE") {
-						cond = new[]{stack.Pop(), "FALSE"};
-						// match JUMP_IF_TRUE pattern {JUMP_IF_FALSE label; JUMP xxx; label:}
-						if(line+2 < rawCode.Length && jumpAddr == rawCode[line+2][0] && rawCode[line+1][1] == "JUMP") {
-							cond[1] = "TRUE";
-							jumpAddr = rawCode[line+1][2];
-							nextLine = line+2;
-						}
-					}
+					if(opcode == "JUMP_IF_FALSE")
+						cond = new[]{stack.Pop()};
 					// out-of-bound address means EXIT
 					if(!rawLineFromAddr.ContainsKey(jumpAddr)) {
 						translated[line] = new Instruction{addr=addr, opcode=Opcode.EXIT, args=cond};

@@ -20,62 +20,137 @@ public class ExprGen {
 		return new CodeDelegateInvokeExpression(opNegation, expr); 
 	}
 	
+	static Dictionary<System.Type, int> vectorTypeSizes = new Dictionary<System.Type, int>(){
+		{typeof(Vector2), 2}, {typeof(Vector2Int), 2},
+		{typeof(Vector3), 3}, {typeof(Vector3Int), 3},
+		{typeof(Vector4), 4}, {typeof(Quaternion), 4},
+		{typeof(Color32), 4}, {typeof(Color), 4}, 
+	};
 	
-	public static CodeExpression Value(object value) {
+	public static CodeExpression Ref(object value) {
 		var type = value?.GetType();
-		if(value == null || type.IsPrimitive || value is string)
+		if(value == null || type.IsPrimitive || value is string || value is decimal)
 			return new CodePrimitiveExpression(value);
-		if(value is System.Type)
-			return new CodeTypeOfExpression(value as System.Type);
-		if(type.IsArray) {
-			var elemType = type.GetElementType();
-			var elemDef = elemType.IsValueType ? System.Activator.CreateInstance(elemType) : null;
-			var arr = (System.Array)value;
-			var n = arr.GetLength(0);
-			for(int i=0; i<n; i++)
-				if(!arr.GetValue(i).Equals(elemDef)) {
-					var exprs = new CodeExpression[n];
-					for(int j=0; j<n; j++)
-						exprs[j] = Value(arr.GetValue(j));
-					return new CodeArrayCreateExpression(type, exprs);
-				}
-			return new CodeArrayCreateExpression(type, n);
-		}
-		if(!type.IsValueType) {
-			if(value is UdonGameObjectComponentHeapReference) {
-				var refType = (value as UdonGameObjectComponentHeapReference).type;
-				var thisExpr = new CodeThisReferenceExpression();
-				if(refType == typeof(UdonBehaviour))
-					return thisExpr;
-				else if(refType == typeof(GameObject))
-					return new CodePropertyReferenceExpression(thisExpr, "gameObject");
-				else if(refType == typeof(Transform))
-					return new CodePropertyReferenceExpression(thisExpr, "transform");
-			}
-		} else {
-			
+		if(type.IsValueType) {
 			if(type.IsEnum) {
-				var typeExpr = new CodeTypeReferenceExpression(type);
 				var name = System.Enum.GetName(type, value);
 				if(name == null)
 					return new CodeCastExpression(type, new CodePrimitiveExpression((int)value));
-				else
-					return new CodePropertyReferenceExpression(typeExpr, name);
+				return new CodePropertyReferenceExpression(new CodeTypeReferenceExpression(type), name);
 			}
-			if(value is Vector3) {
-				var v = (Vector3)value;
-				return new CodeObjectCreateExpression(type, Value(v[0]), Value(v[1]), Value(v[2]));
+			int size;
+			if(vectorTypeSizes.TryGetValue(type, out size)) {
+				var indexer = type.GetProperty("Item");
+				var expr = new CodeObjectCreateExpression(type);
+				for(int i=0; i<size; i++)
+					expr.Parameters.Add(new CodePrimitiveExpression(indexer.GetValue(value, new object[]{i})));
+				return expr;
 			}
-			if(value is Vector4) {
-				var v = (Vector4)value;
-				return new CodeObjectCreateExpression(type, Value(v[0]), Value(v[1]), Value(v[2]), Value(v[3]));
-			}
-			if(value is Quaternion) {
-				var v = (Quaternion)value;
-				return new CodeObjectCreateExpression(type, Value(v[0]), Value(v[1]), Value(v[2]), Value(v[3]));
+			// TODO: Bounds, Rect, RectInt, LayerMask
+		} else {
+			switch(value) {
+			case System.Type t:
+				return new CodeTypeOfExpression(t);
+			case UdonGameObjectComponentHeapReference heapRef:
+				switch(heapRef.type.Name) {
+				case nameof(GameObject):
+					return new CodePropertyReferenceExpression(new CodeThisReferenceExpression(), "gameObject");
+				case nameof(Transform):
+					return new CodePropertyReferenceExpression(new CodeThisReferenceExpression(), "transform");
+				default: // UdonBehaviour, Object
+					return new CodeThisReferenceExpression();
+				}
 			}
 		}
+		return null;
+	}
+	static bool IsArrayZero(System.Array array) {
+		var elemType = array.GetType().GetElementType();
+		var elemDef = elemType.IsValueType ? System.Activator.CreateInstance(elemType) : null;
+		var n = array.GetLength(0);
+		for(int i=0; i<n; i++)
+			if(!object.Equals(array.GetValue(i), elemDef))
+				return false;
+		return true;
+	}
+	public static CodeExpression Value(object value) {
+		var refValue = Ref(value);
+		if(refValue != null)
+			return refValue;
+		var type = value.GetType();
+		if(type.IsArray) {
+			// var elemType = type.GetElementType();
+			// var elemDef = elemType.IsValueType ? System.Activator.CreateInstance(elemType) : null;
+			// var arr = (System.Array)value;
+			// var n = arr.GetLength(0);
+			// for(int i=0; i<n; i++)
+			// 	if(!arr.GetValue(i).Equals(elemDef)) {
+			// 		var exprs = new CodeExpression[n];
+			// 		for(int j=0; j<n; j++)
+			// 			exprs[j] = Value(arr.GetValue(j));
+			// 		return new CodeArrayCreateExpression(type, exprs);
+			// 	}
+			// return new CodeArrayCreateExpression(type, n);
+
+			var array = (System.Array)value;
+			var expr = new CodeArrayCreateExpression(type, array.GetLength(0));
+			if(!IsArrayZero(array))
+				for(int i=0; i<expr.Size; i++)
+					expr.Initializers.Add(Value(array.GetValue(i)));
+			return expr;
+		}
+		switch(value) {
+		case VRC.SDKBase.VRCUrl url:
+			return new CodeObjectCreateExpression(type, new CodePrimitiveExpression(url.Get()));
+		// TODO: AnimationCurve, Gradient
+		}
 		return new CodeSnippetExpression($"???{value}???");
+	}
+	public static bool SideEffect(CodeExpression expr) {
+		switch(expr) {
+		case CodeTypeReferenceExpression _:
+		case CodeTypeOfExpression _:
+		case CodeVariableReferenceExpression _:
+		case CodePrimitiveExpression _:
+			return false;
+
+		case CodeBinaryOperatorExpression e:
+			return SideEffect(e.Left) || SideEffect(e.Right);
+		case CodeCastExpression e:
+			return SideEffect(e.Expression);
+		case CodePropertyReferenceExpression e:
+			return SideEffect(e.TargetObject);
+
+		case CodeArrayIndexerExpression e:
+			foreach(CodeExpression x in e.Indices)
+				if(SideEffect(x))
+					return true;
+			return SideEffect(e.TargetObject);
+		case CodeIndexerExpression e:
+			foreach(CodeExpression x in e.Indices)
+				if(SideEffect(x))
+					return true;
+			return SideEffect(e.TargetObject);
+
+		case CodeArrayCreateExpression e:
+			foreach(CodeExpression x in e.Initializers)
+				if(SideEffect(x))
+					return true;
+			return SideEffect(e.SizeExpression);
+		case CodeObjectCreateExpression e:
+			foreach(CodeExpression x in e.Parameters)
+				if(SideEffect(x))
+					return true;
+			return false;
+		case CodeMethodInvokeExpression e:
+			foreach(CodeExpression x in e.Parameters)
+				if(SideEffect(x))
+					return true;
+			return SideEffect(e.Method.TargetObject);
+		
+		default:
+			return true;
+		}
 	}
 	public static string GenerateCode(CodeObject obj) {
 		using (var writer = new System.IO.StringWriter()) {

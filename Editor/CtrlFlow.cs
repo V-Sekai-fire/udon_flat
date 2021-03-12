@@ -20,8 +20,37 @@ public class CtrlFlowAnalyzer {
 	
 	public CtrlFlowType[] types;
 
+	public string[] entries;
+	public bool[] entryContinue;
+	void MarkEntries() {
+		entries = new string[ir.irCode.Length];
+		foreach(var name in program.EntryPoints.GetSymbols()) {
+			var addr = program.EntryPoints.GetAddressFromSymbol(name);
+			entries[ir.irLineFromAddr[$"0x{addr:X8}"]] = name;
+		}
+		foreach(var instr in ir.irCode)
+			if(instr.opcode == Opcode.CALL) {
+				var callLine = ir.irLineFromAddr[instr.arg0];
+				if(entries[callLine] == null)
+					entries[callLine] = "";
+			}
+
+		entryContinue = new bool[ir.irCode.Length];
+		var entryName = "Init";
+		var entryId = 0;
+		for(int line=0; line<ir.irCode.Length; line++)
+			if(entries[line] == "") {
+				entries[line] = $"{entryName}_{entryId}";
+				entryId ++;
+				entryContinue[line] = true;
+			} else if(entries[line] != null) {
+				entryName = entries[line];
+				entryId = 0;
+			}
+	}
+
 	public int[] loopBegin;
-	void CreateLoops() {
+	void LocateLoops() {
 		loopBegin = new int[ir.irCode.Length];
 		for(int line=ir.irCode.Length-1; line>=0; line--)
 			if(ir.irCode[line].opcode == Opcode.JUMP) {
@@ -39,7 +68,7 @@ public class CtrlFlowAnalyzer {
 	}
 
 	public int[] choiceEnd;
-	void CreateChoices() {
+	void LocateChoices() {
 		choiceEnd = new int[ir.irCode.Length];
 		for(int line=0; line<ir.irCode.Length; line++)
 			if(ir.irCode[line].opcode == Opcode.JUMP) {
@@ -69,7 +98,7 @@ public class CtrlFlowAnalyzer {
 			}
 	}
 
-	void CreateBreaks() {
+	void LocateBreaks() {
 		var loops = new Stack<int>();
 		for(int line=ir.irCode.Length-1; line>=0; line--) {
 			if(ir.irCode[line].opcode == Opcode.JUMP) {
@@ -89,23 +118,8 @@ public class CtrlFlowAnalyzer {
 		}
 	}
 
-	public string[] entries;
-	void CreateEntries() {
-		entries = new string[ir.irCode.Length];
-		foreach(var name in program.EntryPoints.GetSymbols()) {
-			var addr = program.EntryPoints.GetAddressFromSymbol(name);
-			entries[ir.irLineFromAddr[$"0x{addr:X8}"]] = name;
-		}
-		foreach(var instr in ir.irCode)
-			if(instr.opcode == Opcode.CALL) {
-				var jumpLine = ir.irLineFromAddr[instr.arg0];
-				if(entries[jumpLine] == null)
-					entries[jumpLine] = $"entry_{jumpLine}";
-			}
-	}
-
 	public string[] labels;
-	void CreateLabels() {
+	void MarkLabels() {
 		labels = new string[ir.irCode.Length];
 		foreach(var instr in ir.irCode)
 			if(instr.opcode == Opcode.JUMP && types[ir.irLineFromAddr[instr.addr]] == CtrlFlowType.None) {
@@ -116,7 +130,7 @@ public class CtrlFlowAnalyzer {
 	}
 
 	public HashSet<int> jumpTargets;
-	void FindJumpTargets() {
+	void MarkJumpTargets() {
 		var reUdonCall = new Regex(@"\.__SendCustom(Network)?Event");
 		jumpTargets = new HashSet<int>();
 		foreach(var instr in ir.irCode) {
@@ -131,12 +145,12 @@ public class CtrlFlowAnalyzer {
 	}
 	public void Analyze() {
 		types = new CtrlFlowType[ir.irCode.Length];
-		CreateEntries();
-		CreateLoops();
-		CreateChoices();
-		CreateBreaks();
-		CreateLabels();
-		FindJumpTargets();
+		MarkEntries();
+		LocateLoops();
+		LocateChoices();
+		LocateBreaks();
+		MarkLabels();
+		MarkJumpTargets();
 	}
 }
 }
