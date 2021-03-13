@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 using VRC.Udon.Common.Interfaces;
 using VRC.Udon.Editor;
 
-namespace SharperUdon {
+namespace UdonFlat {
 public enum Opcode {
 	EXTERN, // arg0: signature, args: parameters
 	CALL, // arg0: address

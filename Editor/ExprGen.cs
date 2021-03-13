@@ -7,7 +7,7 @@ using System.CodeDom.Compiler;
 using VRC.Udon;
 using VRC.Udon.Common;
 
-namespace SharperUdon {
+namespace UdonFlat {
 public class ExprGen {
 	public static CodeExpression op_LogicalNot = new CodeVariableReferenceExpression("!");
 	public static CodePrimitiveExpression True = new CodePrimitiveExpression(true);
@@ -153,22 +153,26 @@ public class ExprGen {
 			return true;
 		}
 	}
-	public static string GenerateCode(CodeObject obj) {
-		using (var writer = new System.IO.StringWriter()) {
-			using (var provider = CodeDomProvider.CreateProvider("CSharp")) {
-				var options = new CodeGeneratorOptions();
-				// options.BracingStyle = "Block";
-				options.IndentString = "\t";
-				options.BlankLinesBetweenMembers = false;
-				options.ElseOnClosing = true;
-				if(obj is CodeExpression)
-					provider.GenerateCodeFromExpression(obj as CodeExpression, writer, options);
-				else if(obj is CodeStatement)
-					provider.GenerateCodeFromStatement(obj as CodeStatement, writer, options);
-				else if(obj is CodeTypeMember)
-					provider.GenerateCodeFromMember(obj as CodeTypeMember, writer, options);
-				return writer.ToString();
+	public static void GenerateCode(CodeObject obj, System.IO.TextWriter writer) {
+		using(var provider = CodeDomProvider.CreateProvider("CSharp")) {
+			var options = new CodeGeneratorOptions();
+			options.IndentString = "\t";
+			options.BlankLinesBetweenMembers = false;
+			options.ElseOnClosing = true;
+			switch(obj) {
+			case CodeExpression expr:
+				provider.GenerateCodeFromExpression(expr, writer, options); return;
+			case CodeStatement stat:
+				provider.GenerateCodeFromStatement(stat, writer, options); return;
+			case CodeTypeMember member:
+				provider.GenerateCodeFromMember(member, writer, options); return;
 			}
+		}
+	}
+	public static string GenerateCode(CodeObject obj) {
+		using(var writer = new System.IO.StringWriter()) {
+			GenerateCode(obj, writer);
+			return writer.ToString();
 		}
 	}
 }

@@ -4,11 +4,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.CodeDom;
+using System.CodeDom.Compiler;
 using VRC.Udon.Common.Interfaces;
 using VRC.Udon.Graph;
 using VRC.Udon.Editor;
 
-namespace SharperUdon {
+namespace UdonFlat {
 public class Symbol {
 	public string name;
 	public uint addr;
@@ -95,9 +96,9 @@ public class Entry {
 	public bool exported;
 
 	string prettyName;
-	DataFlowAnalyzer.EventEntry eventEntry;
+	DataFlow.EventEntry eventEntry;
 
-	public Entry(string name, IUdonSymbolTable table, DataFlowAnalyzer.EventEntry eventEntry) {
+	public Entry(string name, IUdonSymbolTable table, DataFlow.EventEntry eventEntry) {
 		this.name = name;
 		this.eventEntry = eventEntry;
 
@@ -155,8 +156,8 @@ public class Decompiler {
 	}
 
 	public IRGen ir;
-	public CtrlFlowAnalyzer ctrlFlow;
-	public DataFlowAnalyzer dataFlow;
+	public CtrlFlow ctrlFlow;
+	public DataFlow dataFlow;
 
 	public Symbol[] symbols;
 	public List<Entry> entries;
@@ -194,10 +195,10 @@ public class Decompiler {
 		ir.Disassemble();
 		ir.Generate();
 
-		ctrlFlow = new CtrlFlowAnalyzer{program=program, ir=ir};
+		ctrlFlow = new CtrlFlow{program=program, ir=ir};
 		ctrlFlow.Analyze();
 
-		dataFlow = new DataFlowAnalyzer{program=program, ir=ir, ctrlFlow=ctrlFlow};
+		dataFlow = new DataFlow{program=program, ir=ir, ctrlFlow=ctrlFlow};
 		dataFlow.Analyze();
 
 		InitSymbols();
@@ -436,22 +437,31 @@ public class Decompiler {
 
 		writer.WriteLine($"public class {name} : UdonSharp.UdonSharpBehaviour {{");
 
-		var methodCode = new List<string>();
-		for(int line=0; line<ir.irCode.Length; line++)
-			if(ctrlFlow.entries[line] != null) {
-				var code = StatGen.PatchOperator(ExprGen.GenerateCode(BuildMethod(line)));
-				methodCode.Add(Regex.Replace(code, @"var_(\w+)", m => {
+		string methodCode;
+		using(var stringWriter = new System.IO.StringWriter()) {
+			using(var indentWriter = new IndentedTextWriter(stringWriter, "\t")) {
+				indentWriter.Indent ++;
+				indentWriter.Write("\t");
+				for(int line=0; line<ir.irCode.Length; line++)
+					if(ctrlFlow.entries[line] != null)
+						ExprGen.GenerateCode(BuildMethod(line), indentWriter);
+			}
+			methodCode = Regex.Replace(StatGen.PatchOperator(stringWriter.ToString()),
+				@"var_(\w+)", m => {
 					var symbol = symbolFromName[m.Groups[1].Value];
 					usedSymbols.Add(symbol);
 					return symbol.ToString();
-				}));
-			}
-		
-		foreach(var symbol in symbols)
-			if(symbol.exported || usedSymbols.Contains(symbol))
-				writer.Write(ExprGen.GenerateCode(symbol.BuildMember()));
-		foreach(var code in methodCode)
-			writer.Write(code);
+				});
+		}
+		using(var indentWriter = new IndentedTextWriter(writer, "\t")) {
+			indentWriter.Indent ++;
+			indentWriter.Write("\t");
+			foreach(var symbol in symbols)
+				if(symbol.exported || usedSymbols.Contains(symbol))
+					ExprGen.GenerateCode(symbol.BuildMember(), indentWriter);
+			
+		}
+		writer.Write(methodCode);
 
 		writer.WriteLine("}");
 	}

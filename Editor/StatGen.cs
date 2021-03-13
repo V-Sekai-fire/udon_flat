@@ -7,7 +7,7 @@ using System.CodeDom;
 using VRC.Udon.Graph;
 using VRC.Udon.Editor;
 
-namespace SharperUdon {
+namespace UdonFlat {
 public class StatGen {
 	static Dictionary<string, CodeBinaryOperatorType> operatorTypes = new Dictionary<string, CodeBinaryOperatorType>{
 		{"op_Addition",       CodeBinaryOperatorType.Add},

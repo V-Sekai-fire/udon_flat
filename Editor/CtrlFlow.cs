@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 using VRC.Udon.Common.Interfaces;
 using VRC.Udon.Editor;
 
-namespace SharperUdon {
+namespace UdonFlat {
 public enum JumpType {
 	None = 0,
 	Loop,
@@ -14,7 +14,7 @@ public enum JumpType {
 	Break,
 	Continue,
 }
-public class CtrlFlowAnalyzer {
+public class CtrlFlow {
 	public IUdonProgram program;
 	public IRGen ir;
 

@@ -5,9 +5,9 @@ using System.Linq;
 using VRC.Udon.Common.Interfaces;
 using VRC.Udon.Editor.ProgramSources;
 
-namespace SharperUdon {
+namespace UdonFlat {
 public class EditorTool {
-	[MenuItem("SharperUdon/GenerateCode")]
+	[MenuItem("UdonFlat/GenerateCode", false, 100)]
 	public static void GenerateCode() {
 		var programAsset = Selection.activeObject as UdonProgramAsset;
 		if(programAsset)
@@ -20,7 +20,7 @@ public class EditorTool {
 		GenerateCode((UdonProgramAsset)command.context);
 	}
 	static void GenerateCode(UdonProgramAsset programAsset) {
-		var outputPath = System.IO.Path.ChangeExtension(AssetDatabase.GetAssetPath(programAsset), "txt");
+		var outputPath = System.IO.Path.ChangeExtension(AssetDatabase.GetAssetPath(programAsset), "cs.txt");
 		var program = programAsset.SerializedProgramAsset.RetrieveProgram();
 		GenerateCode(program, outputPath, programAsset.name);
 		Debug.Log($"code generated at {outputPath}");
@@ -29,10 +29,9 @@ public class EditorTool {
 		var decompiler = new Decompiler{program=program, name=name};
 		decompiler.Init();
 		decompiler.Translate();
-		using(var writer = System.IO.File.CreateText(outputPath)) {
-			// writer.WriteLine(decompiler.ir.GetIRCode());
+		using(var writer = System.IO.File.CreateText(outputPath))
 			decompiler.GenerateCode(writer);
-		}
+		UnityEditorInternal.InternalEditorUtility.OpenFileAtLineExternal(outputPath, -1);
 	}
 }
 }
