@@ -30,14 +30,16 @@ public class StatGen {
 		{"op_LogicalAnd",     CodeBinaryOperatorType.BitwiseAnd},
 		{"op_LogicalOr",      CodeBinaryOperatorType.BitwiseOr},
 	};
+	static Dictionary<string, (string, CodeBinaryOperatorType)> operatorStrTypes = new Dictionary<string, (string, CodeBinaryOperatorType)> {
+		{"op_LeftShift",  ("<<", CodeBinaryOperatorType.LessThan)},
+		{"op_RightShift", (">>", CodeBinaryOperatorType.GreaterThan)},
+		{"op_LogicalXor", ("^",  CodeBinaryOperatorType.BitwiseOr)},
+	};
 	static Dictionary<string, CodeExpression> operatorExprs = new Dictionary<string, CodeExpression>{
-		{"op_UnaryNegation", ExprGen.opNegation},
-		{"op_UnaryPlus",  new CodeSnippetExpression("+")},
-		{"op_UnaryMinus", new CodeSnippetExpression("-")},
-		// TODO: implement surrogate
-		{"op_LeftShift",  new CodeSnippetExpression("LeftShift")},
-		{"op_RightShift", new CodeSnippetExpression("RightShift")},
-		{"op_LogicalXor", new CodeSnippetExpression("LogicalXor")},
+		{"op_LogicalNot",    ExprGen.op_LogicalNot},
+		{"op_UnaryPlus",     new CodeVariableReferenceExpression("+")},
+		{"op_UnaryMinus",    new CodeVariableReferenceExpression("-")},
+		{"op_UnaryNegation", new CodeVariableReferenceExpression("-")},
 	};
 	static Dictionary<UdonNodeParameter.ParameterType, FieldDirection> parameterDirs = new Dictionary<UdonNodeParameter.ParameterType, FieldDirection> {
 		{UdonNodeParameter.ParameterType.IN,     FieldDirection.In},
@@ -45,24 +47,34 @@ public class StatGen {
 		{UdonNodeParameter.ParameterType.IN_OUT, FieldDirection.Ref},
 	};
 	public static string COPY = "Get_Variable";
+	public static string PatchOperator(string code) {
+		return Regex.Replace(code, $@"[<>|](\s*)({string.Join("|", operatorStrTypes.Keys)})(?=\()",
+			m => operatorStrTypes[m.Groups[2].Value].Item1 + m.Groups[1].Value);
+	}
 	public static CodeStatement Extern(UdonNodeDefinition nodeDef, CodeExpression[] paramExprs) {
-		var name = nodeDef.name.Split(' ').Last();
 		var type = nodeDef.type;
+		var name = nodeDef.name.Split(' ').Last();
 		var paramDefs = nodeDef.parameters;
-		var typeExpr = (CodeExpression)new CodeTypeReferenceExpression(type);
 		var paramExprsSkipLast = paramExprs.Take(paramDefs.Count-1);
+		var typeExpr = (CodeExpression)new CodeTypeReferenceExpression(type);
+		if(name == "op_UnaryNegation" && type == typeof(bool))
+			name = "op_LogicalNot";
 
 		var rhs = (CodeExpression)null;
 		var lhs = (CodeExpression)null;
 		if(nodeDef.fullName == COPY)
 			(lhs, rhs) = (paramExprs[1], paramExprs[0]);
 		if(rhs == null) { // operator & constructor
-			if(operatorTypes.ContainsKey(name))
-				rhs = new CodeBinaryOperatorExpression(paramExprs[0], operatorTypes[name], paramExprs[1]);
-			else if(operatorExprs.ContainsKey(name))
-				rhs = new CodeDelegateInvokeExpression(operatorExprs[name], paramExprsSkipLast.ToArray());
+			if(operatorTypes.TryGetValue(name, out var opType))
+				rhs = new CodeBinaryOperatorExpression(paramExprs[0], opType, paramExprs[1]);
+			else if(operatorStrTypes.TryGetValue(name, out var opStrType))
+				// express (A op B) as (A op' op_Name(B))
+				rhs = new CodeBinaryOperatorExpression(paramExprs[0], opStrType.Item2,
+					new CodeDelegateInvokeExpression(new CodeVariableReferenceExpression(name), paramExprs[1]));
+			else if(operatorExprs.TryGetValue(name, out var opExpr))
+				rhs = new CodeDelegateInvokeExpression(opExpr, paramExprsSkipLast.ToArray());
 			else if(name == "op_Implicit")
-				rhs = paramExprs[0];
+				rhs = paramExprs[0]; // TODO: will this cause problem?
 			else if(name == "op_Explicit")
 				rhs = new CodeCastExpression(paramDefs[1].type, paramExprs[0]);
 			else if(name == "ctor")
@@ -128,6 +140,19 @@ public class StatGen {
 		return Extern(nodeDef, Enumerable.Range(0, paramDefs.Count).Select(i =>
 				paramDefs[i].type == typeof(System.Type) ? new CodeTypeOfExpression($"_{i}")
 				: (CodeExpression) new CodeVariableReferenceExpression($"_{i}")).ToArray());
+	}
+	public static CodeStatement If(CodeExpression condition, CodeStatement stat) {
+		var prim = condition as CodePrimitiveExpression;
+		if(prim != null && prim.Value is bool)
+			return (bool)prim.Value ? stat : null;
+		else
+			return new CodeConditionStatement(condition, stat);
+	}
+	public static CodeStatement Break = new CodeExpressionStatement(new CodeSnippetExpression("break"));
+	public static CodeStatement Continue = new CodeExpressionStatement(new CodeSnippetExpression("continue"));
+	static CodeStatement noop = new CodeExpressionStatement(new CodeSnippetExpression(""));
+	public static CodeIterationStatement While() {
+		return new CodeIterationStatement(noop, ExprGen.True, noop);
 	}
 }
 }

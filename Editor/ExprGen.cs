@@ -9,15 +9,17 @@ using VRC.Udon.Common;
 
 namespace SharperUdon {
 public class ExprGen {
-	public static CodeExpression opNegation = new CodeSnippetExpression("!");
-	public static CodeExpression Negate(CodeExpression expr) {
+	public static CodeExpression op_LogicalNot = new CodeVariableReferenceExpression("!");
+	public static CodePrimitiveExpression True = new CodePrimitiveExpression(true);
+	public static CodePrimitiveExpression False = new CodePrimitiveExpression(false);
+	public static CodeExpression Not(CodeExpression expr) {
 		var prim = expr as CodePrimitiveExpression;
 		if(prim != null && prim.Value is bool)
 			return new CodePrimitiveExpression(!(bool)prim.Value);
 		var invoke = expr as CodeDelegateInvokeExpression;
-		if(invoke != null && invoke.TargetObject == opNegation)
+		if(invoke != null && invoke.TargetObject == op_LogicalNot)
 			return invoke.Parameters[0];
-		return new CodeDelegateInvokeExpression(opNegation, expr); 
+		return new CodeDelegateInvokeExpression(op_LogicalNot, expr); 
 	}
 	
 	static Dictionary<System.Type, int> vectorTypeSizes = new Dictionary<System.Type, int>(){
@@ -38,8 +40,7 @@ public class ExprGen {
 					return new CodeCastExpression(type, new CodePrimitiveExpression((int)value));
 				return new CodePropertyReferenceExpression(new CodeTypeReferenceExpression(type), name);
 			}
-			int size;
-			if(vectorTypeSizes.TryGetValue(type, out size)) {
+			if(vectorTypeSizes.TryGetValue(type, out var size)) {
 				var indexer = type.GetProperty("Item");
 				var expr = new CodeObjectCreateExpression(type);
 				for(int i=0; i<size; i++)
@@ -159,6 +160,7 @@ public class ExprGen {
 				// options.BracingStyle = "Block";
 				options.IndentString = "\t";
 				options.BlankLinesBetweenMembers = false;
+				options.ElseOnClosing = true;
 				if(obj is CodeExpression)
 					provider.GenerateCodeFromExpression(obj as CodeExpression, writer, options);
 				else if(obj is CodeStatement)

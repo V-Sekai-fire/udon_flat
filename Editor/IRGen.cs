@@ -10,8 +10,8 @@ namespace SharperUdon {
 public enum Opcode {
 	EXTERN, // arg0: signature, args: parameters
 	CALL, // arg0: address
-	JUMP, // arg0: address, args: condition
-	EXIT, RETURN, // args: condition
+	JUMP, // arg0: address, args: falseCond
+	EXIT, RETURN, // args: falseCond
 }
 public class Instruction {
 	public string addr;
@@ -19,7 +19,7 @@ public class Instruction {
 	public string arg0;
 	public string[] args;
 	public override string ToString() {
-		return $"{addr}: {opcode,-6} {arg0} {(args == null ? null : string.Join(" ", args))}";
+		return $"{addr}\t{opcode}\t{arg0}\t{(args == null ? null : string.Join("\t", args))}";
 	}
 }
 public class IRGen {
@@ -84,20 +84,18 @@ public class IRGen {
 					Translate(rawLineFromAddr[jumpAddr], new Stack<string>(stack)); // explore hidden entry point
 					stack.Pop();
 				} else {
-					var cond = default(string[]);
-					if(opcode == "JUMP_IF_FALSE")
-						cond = new[]{stack.Pop()};
+					var cond = opcode == "JUMP_IF_FALSE" ? new[]{stack.Pop()} : null;
 					// out-of-bound address means EXIT
-					if(!rawLineFromAddr.ContainsKey(jumpAddr)) {
+					if(!rawLineFromAddr.TryGetValue(jumpAddr, out var jumpLine)) {
 						translated[line] = new Instruction{addr=addr, opcode=Opcode.EXIT, args=cond};
 						if(cond == null)
 							return;
-					} else if(rawLineFromAddr[jumpAddr] != nextLine) { // skip no-op
+					} else if(jumpLine != nextLine) { // skip no-op
 						translated[line] = new Instruction{addr=addr, opcode=Opcode.JUMP, arg0=jumpAddr, args=cond};
 						if(cond == null)
-							nextLine = rawLineFromAddr[jumpAddr];
+							nextLine = jumpLine;
 						else
-							Translate(rawLineFromAddr[jumpAddr], new Stack<string>(stack)); // explore branch
+							Translate(jumpLine, new Stack<string>(stack)); // explore branch
 					}
 				}
 			} else if(opcode == "JUMP_INDIRECT") {
@@ -147,7 +145,7 @@ public class IRGen {
 	public void Generate() {
 		Translate();
 		CollapseLines();
-		CollapseJumps();
+		// CollapseJumps(); // TODO: refactoring works better without this
 	}
 
 	public string GetRawCode() {

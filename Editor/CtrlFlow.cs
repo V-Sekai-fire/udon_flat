@@ -7,7 +7,7 @@ using VRC.Udon.Common.Interfaces;
 using VRC.Udon.Editor;
 
 namespace SharperUdon {
-public enum CtrlFlowType {
+public enum JumpType {
 	None = 0,
 	Loop,
 	If, Else,
@@ -17,8 +17,6 @@ public enum CtrlFlowType {
 public class CtrlFlowAnalyzer {
 	public IUdonProgram program;
 	public IRGen ir;
-	
-	public CtrlFlowType[] types;
 
 	public string[] entries;
 	public bool[] entryContinue;
@@ -49,6 +47,8 @@ public class CtrlFlowAnalyzer {
 			}
 	}
 
+	public JumpType[] jumpTypes;
+
 	public int[] loopBegin;
 	void LocateLoops() {
 		loopBegin = new int[ir.irCode.Length];
@@ -60,7 +60,7 @@ public class CtrlFlowAnalyzer {
 					for(int i=line; i>jumpLine && level>=0; i--) 
 						level -= loopBegin[i];
 					if(level == 0) {
-						types[line] = CtrlFlowType.Loop;
+						jumpTypes[line] = JumpType.Loop;
 						loopBegin[jumpLine] ++;
 					}
 				}
@@ -74,10 +74,10 @@ public class CtrlFlowAnalyzer {
 			if(ir.irCode[line].opcode == Opcode.JUMP) {
 				var jumpLine = ir.irLineFromAddr[ir.irCode[line].arg0];
 				if(jumpLine > line) {
-					var type = CtrlFlowType.If;
+					var type = JumpType.If;
 					var level = 0;
 					if(line+1 < jumpLine && choiceEnd[line+1] == 1 && ir.irCode[line].args == null) {
-						type = CtrlFlowType.Else;
+						type = JumpType.Else;
 						level = 1;
 					}
 					for(int i=line+1; i<jumpLine && level>=0; i++) {
@@ -85,13 +85,13 @@ public class CtrlFlowAnalyzer {
 						if(level < 0)
 							break;
 						level += loopBegin[i];
-						if(types[i] == CtrlFlowType.Loop)
+						if(jumpTypes[i] == JumpType.Loop)
 							level --;
 					}
 					if(level == 0) {
-						types[line] = type;
+						jumpTypes[line] = type;
 						choiceEnd[jumpLine] ++;
-						if(type == CtrlFlowType.Else)
+						if(type == JumpType.Else)
 							choiceEnd[line+1] --;
 					}
 				}
@@ -102,15 +102,15 @@ public class CtrlFlowAnalyzer {
 		var loops = new Stack<int>();
 		for(int line=ir.irCode.Length-1; line>=0; line--) {
 			if(ir.irCode[line].opcode == Opcode.JUMP) {
-				if(types[line] == CtrlFlowType.Loop)
+				if(jumpTypes[line] == JumpType.Loop)
 					loops.Push(line);
-				else if(types[line] == CtrlFlowType.None && loops.Count>0) {
+				else if(jumpTypes[line] == JumpType.None && loops.Count>0) {
 					var jumpLine = ir.irLineFromAddr[ir.irCode[line].arg0];
 					var loopLine = loops.Peek();
 					if(jumpLine == loopLine+1)
-						types[line] = CtrlFlowType.Break;
+						jumpTypes[line] = JumpType.Break;
 					else if(jumpLine == ir.irLineFromAddr[ir.irCode[loopLine].arg0])
-						types[line] = CtrlFlowType.Continue;
+						jumpTypes[line] = JumpType.Continue;
 				}
 			}
 			for(int i=loopBegin[line]; i>0; i--)
@@ -122,7 +122,7 @@ public class CtrlFlowAnalyzer {
 	void MarkLabels() {
 		labels = new string[ir.irCode.Length];
 		foreach(var instr in ir.irCode)
-			if(instr.opcode == Opcode.JUMP && types[ir.irLineFromAddr[instr.addr]] == CtrlFlowType.None) {
+			if(instr.opcode == Opcode.JUMP && jumpTypes[ir.irLineFromAddr[instr.addr]] == JumpType.None) {
 				var jumpLine = ir.irLineFromAddr[instr.arg0];
 				if(labels[jumpLine] == null)
 					labels[jumpLine] = $"label_{jumpLine}";
@@ -144,8 +144,9 @@ public class CtrlFlowAnalyzer {
 		}
 	}
 	public void Analyze() {
-		types = new CtrlFlowType[ir.irCode.Length];
 		MarkEntries();
+
+		jumpTypes = new JumpType[ir.irCode.Length];
 		LocateLoops();
 		LocateChoices();
 		LocateBreaks();

@@ -10,9 +10,6 @@ using VRC.Udon.Editor;
 namespace SharperUdon {
 public class DataFlowAnalyzer {
 	public IUdonProgram program;
-	public static UdonNodeDefinition GetNodeDefinition(string fullName) {
-		return UdonEditorManager.Instance.GetNodeDefinition(fullName);
-	}
 	public IRGen ir;
 	public CtrlFlowAnalyzer ctrlFlow;
 
@@ -51,25 +48,23 @@ public class DataFlowAnalyzer {
 		public int outputRef;
 		public (int,int)? inputSrc;
 	}
-	public Port[][] ports;
 	public Port[]   port0;
+	public Port[][] ports;
 	public HashSet<string> variables;
 	void AnalyzePorts() {
 		port0 = new Port[ir.irCode.Length];
 		ports = new Port[ir.irCode.Length][];
 		
-		var outPort0 = new Dictionary<string, (int,int)>();
-		var outPorts = new Dictionary<string, List<(int line,int i)>>();
+		var epoch = 0;
 		var queue = new Queue<(int line, int i)>();
+		var outRecent = new Dictionary<string, ((int,int),int)>();
+		var outEscape = new Dictionary<string, List<(int,int)>>();
 		for(int line=0; line<ir.irCode.Length; line++) {
-			if(ctrlFlow.jumpTargets.Contains(line))
-				outPort0.Clear();
-
 			var instr = ir.irCode[line];
 			if(instr.args != null) {
 				var linePorts = new Port[instr.args.Length];
 				if(instr.opcode == Opcode.EXTERN) {
-					var nodeDef = GetNodeDefinition(instr.arg0);
+					var nodeDef = UdonEditorManager.Instance.GetNodeDefinition(instr.arg0);
 					for(int i=0; i<nodeDef.parameters.Count; i++) {
 						if(nodeDef.parameters[i].parameterType != UdonNodeParameter.ParameterType.OUT)
 							linePorts[i].type |= 1;
@@ -77,57 +72,74 @@ public class DataFlowAnalyzer {
 							linePorts[i].type |= 2;
 					}
 					if(instr.arg0 != StatGen.COPY)
-						queue.Enqueue((line, -1));
+						queue.Enqueue((line, -1)); // proper EXTERN is volatile
 				} else {
 					linePorts[0].type |= 1;
-					queue.Enqueue((line, -1));
+					queue.Enqueue((line, -1)); // conditional statement is volatile
 				}
-
 				ports[line] = linePorts;
+
 				for(int i=0; i<linePorts.Length; i++)
-					if((linePorts[i].type & 1) != 0 && outPort0.ContainsKey(instr.args[i]))
-						linePorts[i].inputSrc = outPort0[instr.args[i]];
+					if((linePorts[i].type & 1) != 0)
+						if(outRecent.TryGetValue(instr.args[i], out var portTime))
+							linePorts[i].inputSrc = portTime.Item1;
 				for(int i=0; i<linePorts.Length; i++)
 					if((linePorts[i].type & 2) != 0) {
-						if(!outPorts.ContainsKey(instr.args[i]))
-							outPorts[instr.args[i]] = new List<(int,int)>();
-						outPorts[instr.args[i]].Add((line, i));
-						outPort0[instr.args[i]] = (line, i);
-						if(program.SymbolTable.HasExportedSymbol(instr.args[i]))
-							queue.Enqueue((line, i));
+						var symbol = instr.args[i];
+						if(outRecent.TryGetValue(symbol, out var portTime) && portTime.Item2 < epoch) {
+							if(!outEscape.TryGetValue(symbol, out var lst))
+								outEscape[symbol] = lst = new List<(int,int)>();
+							lst.Add(portTime.Item1); // flush lazy escape
+						}
+						outRecent[symbol] = ((line, i), epoch);
+						if(program.SymbolTable.HasExportedSymbol(symbol))
+							queue.Enqueue((line, i)); // exported symbol is volatile
 					}
+			}
+
+			// escape after jump sources & before jump targets
+			if(instr.opcode != Opcode.EXTERN)
+				epoch ++; // lazy escape
+			if(ctrlFlow.jumpTargets.Contains(line+1) || line+1 == ir.irCode.Length) {
+				foreach(var symbolPortTime in outRecent) {
+					if(!outEscape.TryGetValue(symbolPortTime.Key, out var lst))
+						outEscape[symbolPortTime.Key] = lst = new List<(int,int)>();
+					lst.Add(symbolPortTime.Value.Item1); // flush lazy escape
+				}
+				outRecent.Clear();
 			}
 		}
 
-		variables = new HashSet<string>(program.SymbolTable.GetExportedSymbols().Concat(outPorts.Keys));
-		foreach(var ev in eventFromEntry.Values)
-			foreach(var name in ev.symbolNames)
+		variables = new HashSet<string>(program.SymbolTable.GetExportedSymbols().Concat(outEscape.Keys));
+		foreach(var eventEntry in eventFromEntry.Values)
+			foreach(var name in eventEntry.symbolNames)
 				variables.Add(name);
 
+		// BFS ports from volatiles
 		for(var visited = new HashSet<(int,int)>(); queue.Count > 0; ) {
 			var head = queue.Dequeue();
-			if(head.i >= 0)
+			if(head.i >= 0) // output port
 				ports[head.line][head.i].outputRef++;
-			else
+			else // statement port
 				port0[head.line].outputRef++;
 			if(visited.Contains(head))
 				continue;
 			visited.Add(head);
 
 			var linePorts = ports[head.line];
-			if(head.i >= 0)
+			if(head.i >= 0) // output port
 				queue.Enqueue((head.line, -1));
-			else
+			else // statement port
 				for(int i=0; i<linePorts.Length; i++)
 					if((linePorts[i].type & 1) != 0)
 						if(linePorts[i].inputSrc != null)
 							queue.Enqueue(linePorts[i].inputSrc.Value);
-						else {
-							var name = ir.irCode[head.line].args[i];
-							if(outPorts.ContainsKey(name)) {
-								foreach(var tail in outPorts[name])
+						else { // escaped input port
+							var symbol = ir.irCode[head.line].args[i];
+							if(outEscape.TryGetValue(symbol, out var lst)) {
+								outEscape.Remove(symbol); // do it once
+								foreach(var tail in lst)
 									queue.Enqueue(tail);
-								outPorts.Remove(name);
 							}
 						}
 		}
