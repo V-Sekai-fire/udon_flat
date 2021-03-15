@@ -28,8 +28,8 @@ public class IRGen {
 	public string[][] rawCode;
 	public Dictionary<string, int> rawLineFromAddr;
 	public void Disassemble() {
-		var disassembledProgram = UdonEditorManager.Instance.DisassembleProgram(program);
-		rawCode = System.Array.ConvertAll(disassembledProgram, line => Regex.Split(line, "[:,] "));
+		rawCode = System.Array.ConvertAll(UdonEditorManager.Instance.DisassembleProgram(program),
+			line => Regex.Split(line, "[:,] ", RegexOptions.Compiled));
 		rawLineFromAddr = new Dictionary<string, int>();
 		for(int line=0; line<rawCode.Length; line++)
 			rawLineFromAddr[rawCode[line][0]] = line;
@@ -63,7 +63,7 @@ public class IRGen {
 			} else if(opcode == "COPY") {
 				var targetName = stack.Pop();
 				var sourceName = stack.Pop();
-				if(sourceName != targetName) // skip no-op
+				if(sourceName != targetName) // optimization: skip no-op
 					translated[line] = new Instruction{addr=addr, // express COPY as EXTERN
 						opcode=Opcode.EXTERN, arg0=StatGen.COPY, args=new[]{sourceName, targetName}};
 			} else if(opcode == "EXTERN") {
@@ -90,7 +90,7 @@ public class IRGen {
 						translated[line] = new Instruction{addr=addr, opcode=Opcode.EXIT, args=cond};
 						if(cond == null)
 							return;
-					} else if(jumpLine != nextLine) { // skip no-op
+					} else if(jumpLine != nextLine) { // optimization: skip no-op
 						translated[line] = new Instruction{addr=addr, opcode=Opcode.JUMP, arg0=jumpAddr, args=cond};
 						if(cond == null)
 							nextLine = jumpLine;
@@ -146,21 +146,6 @@ public class IRGen {
 		Translate();
 		CollapseLines();
 		// CollapseJumps(); // TODO: refactoring works better without this
-	}
-
-	public string GetRawCode() {
-		using(var writer = new System.IO.StringWriter()) {
-			foreach(var instr in rawCode)
-				writer.WriteLine(string.Join(" ", instr));
-			return writer.ToString();
-		}
-	}
-	public string GetIRCode() {
-		using(var writer = new System.IO.StringWriter()) {
-			foreach(var instr in irCode)
-				writer.WriteLine(instr.ToString());
-			return writer.ToString();
-		}
 	}
 }
 }

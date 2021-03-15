@@ -31,7 +31,7 @@ public class Symbol {
 
 		exported = table.HasExportedSymbol(name);
 
-		prettyName = unmangleName(name, addr);
+		prettyName = unmangleName(name, addr); // TODO: sharedSymbols
 
 		if(isConst) {
 			constExpr = ExprGen.Ref(value);
@@ -51,7 +51,7 @@ public class Symbol {
 		return prettyName;
 	}
 	public CodeMemberField BuildMember() {
-		var field = new CodeMemberField(type, ToString());
+		var field = new CodeMemberField(ExprGen.Type(type), ToString());
 		field.Attributes = MemberAttributes.Final;
 		if(exported)
 			field.Attributes |= MemberAttributes.Public;
@@ -62,7 +62,7 @@ public class Symbol {
 		if(syncInterp != null) {
 			field.CustomAttributes = new CodeAttributeDeclarationCollection();
 			field.CustomAttributes.Add(new CodeAttributeDeclaration("UdonSharp.UdonSynced",
-				new CodeAttributeArgument(new CodePropertyReferenceExpression(
+				new CodeAttributeArgument(new CodeFieldReferenceExpression(
 					new CodeTypeReferenceExpression("UdonSharp.UdonSyncMode"),
 					syncInterp.Value.ToString()))));
 		}
@@ -71,7 +71,7 @@ public class Symbol {
 	static string unmangleName(string name, uint addr) {
 		var m = Regex.Match(name, @"^__\d+_(.+)_\w+$");
 		if(m.Success)
-			return $"{m.Groups[1].Value}_{addr}_";
+			return $"_{m.Groups[1].Value}_{addr}";
 		return name;
 	}
 	static System.Type getCaster(object value) {
@@ -126,7 +126,7 @@ public class Entry {
 			}
 			for(int i=0; i<eventEntry.symbolNames.Length; i++)
 				method.Parameters.Add(new CodeParameterDeclarationExpression(
-					eventEntry.nodeDef.parameters[i].type, eventEntry.symbolNames[i]));
+					ExprGen.Type(eventEntry.nodeDef.parameters[i].type), eventEntry.symbolNames[i]));
 		}
 		return method;
 	}
@@ -174,7 +174,7 @@ public class Decompiler {
 		symbolFromName = new Dictionary<string, Symbol>();
 		for(int i=0; i<symbolNames.Length; i++) {
 			var symbol = new Symbol(symbolNames[i],
-				symbolTable, heap, syncTable, !dataFlow.variables.Contains(symbolNames[i]));
+				symbolTable, heap, syncTable, !dataFlow.mutableSymbols.Contains(symbolNames[i]));
 			symbols[i] = symbol;
 			symbolFromName[symbol.name] = symbol;
 		}
@@ -203,62 +203,58 @@ public class Decompiler {
 
 		InitSymbols();
 	}
-	
-	int getAssignLeftUsageCount(int line, CodeExpression assignLeft) {
-		var assignVar = assignLeft as CodeVariableReferenceExpression;
-		if(assignVar == null)
-			return 2;
+
+	int? getAssignLeftRefCount(int line, CodeAssignStatement assign) {
+		if(!(assign.Left is CodeVariableReferenceExpression))
+			return null;
+		return dataFlow.ports[line][dataFlow.ports[line].Length-1].outRefCount;
+	}
+	bool substituteInPorts(int line, CodeExpression[] portExprs) {
+		if(dataFlow.port0[line].outRefCount == 0)
+			return false;
+
 		var linePorts = dataFlow.ports[line];
-		return linePorts[linePorts.Length-1].outputRef;
-	}
-
-	void SimplifyInParameters(int line, CodeExpression[] paramExprs) {
-		// return;
-		for(int i=0; i<paramExprs.Length; i++) {
-			var refExpr = paramExprs[i] as CodeVariableReferenceExpression;
-			if(refExpr == null)
-				continue;
-			var symbol = symbolFromExpr[refExpr];
-			if(symbol.constExpr != null)
-				paramExprs[i] = symbol.constExpr;
-		}
-		
-		for(int prevLine=line-1; prevLine>=0 && !ctrlFlow.jumpTargets.Contains(prevLine+1); prevLine--) {
-			if(statements[prevLine] != null) {
-				var prevAssign = statements[prevLine] as CodeAssignStatement;
-				if(prevAssign == null)
-					break;
-
-				// Debug.Log($"{line} try merge {ExprGen.GenerateCode(prevAssign)} into {string.Join(", ", paramExprs.Select(x=>$"{x}"))}");
-				if(getAssignLeftUsageCount(prevLine, prevAssign.Left) > 1) {
-					// Debug.Log("getAssignLeftUsageCount fail");
-					break;
+		for(int i=0; i<portExprs.Length; i++)
+			if((linePorts[i].type & 1) != 0) {
+				var symbol = symbolFromExpr[(CodeVariableReferenceExpression)portExprs[i]];
+				if(symbol.constExpr != null) {
+					portExprs[i] = symbol.constExpr;
+					Debug.Assert(linePorts[i].inSource == null);
 				}
-				var idx = System.Array.IndexOf(paramExprs, prevAssign.Left);
-				if(idx < 0) {
-					// Debug.Log("IndexOf fail");
-					break;
-				}
-				// Debug.Log("OK");
-
-				paramExprs[idx] = prevAssign.Right;
-				statements[prevLine] = null;
 			}
+
+		for(int i=portExprs.Length-1, prevLine=line-1; prevLine>=0; prevLine--) {
+			if(statements[prevLine] == null)
+				continue;
+			var prevAssign = statements[prevLine] as CodeAssignStatement;
+			if(!(prevAssign != null && getAssignLeftRefCount(prevLine, prevAssign) == 1))
+				break;
+			var found = false;
+			for(; i>=0 && !found; i--)
+				if(linePorts[i].inSource == (prevLine, dataFlow.ports[prevLine].Length-1)) {
+					portExprs[i] = prevAssign.Right;
+					statements[prevLine] = null;
+					found = true;
+				}
+			if(!found)
+				break;
 		}
+		return true;
 	}
-	void SimplifyStatement(int line) {
-		// return;
+	void simplifyExtern(int line) {
 		var assign = statements[line] as CodeAssignStatement;
 		if(assign != null) {
-			var indexer = assign.Right as CodeArrayIndexerExpression;
-			if(indexer != null && indexer.TargetObject is CodeVariableReferenceExpression) {
-				var symbol = symbolFromExpr[(CodeVariableReferenceExpression)indexer.TargetObject];
-				if(symbol.caster != null && indexer.Indices.Count == 1)
-					 assign.Right = new CodeCastExpression(symbol.caster, indexer.Indices[0]);
+			switch(assign.Right) {
+			case CodeArrayIndexerExpression indexer: // undo U# enum lookup table
+				if(indexer.TargetObject is CodeVariableReferenceExpression) {
+					var symbol = symbolFromExpr[(CodeVariableReferenceExpression)indexer.TargetObject];
+					if(symbol.caster != null && indexer.Indices.Count == 1)
+						 assign.Right = new CodeCastExpression(ExprGen.Type(symbol.caster), indexer.Indices[0]);
+				}
+				break;
 			}
-			if(getAssignLeftUsageCount(line, assign.Left) == 0) {
+			if(getAssignLeftRefCount(line, assign) == 0)
 				statements[line] = new CodeExpressionStatement(assign.Right);
-			}
 		}
 	}
 
@@ -270,7 +266,7 @@ public class Decompiler {
 		var symbolExprs = new Dictionary<string, CodeVariableReferenceExpression>();
 		symbolFromExpr = new Dictionary<CodeVariableReferenceExpression, Symbol>();
 		foreach(var symbol in symbols) {
-			symbolExprs[symbol.name] = new CodeVariableReferenceExpression($"var_{symbol.name}");
+			symbolExprs[symbol.name] = new CodeVariableReferenceExpression(symbol.ToString());
 			symbolFromExpr[symbolExprs[symbol.name]] = symbol;
 		}
 
@@ -281,92 +277,113 @@ public class Decompiler {
 		statements = new CodeStatement[ir.irCode.Length];
 		for(int line=0; line<ir.irCode.Length; line++) {
 			var instr = ir.irCode[line];
+			var portExprs = default(CodeExpression[]);
+			if(dataFlow.ports[line] != null) {
+				portExprs = System.Array.ConvertAll(instr.args, s => (CodeExpression)symbolExprs[s]);
+				if(!substituteInPorts(line, portExprs))
+					continue;
+			}
 			if(instr.opcode == Opcode.EXTERN) {
-				if(dataFlow.port0[line].outputRef == 0)
+				if(dataFlow.port0[line].outRefCount == 0)
 					continue;
 				var nodeDef = GetNodeDefinition(instr.arg0);
-				var paramExprs = instr.args.Select((s,i) =>
-					nodeDef.parameters[i].parameterType == UdonNodeParameter.ParameterType.IN ?
-						(CodeExpression)symbolExprs[s] : null).ToArray();
-				SimplifyInParameters(line, paramExprs);
-				for(int i=0; i<paramExprs.Length; i++)
-					if(paramExprs[i] == null)
-						paramExprs[i] = symbolExprs[instr.args[i]];
-				statements[line] = StatGen.Extern(nodeDef, paramExprs);
-				// COPY may produce casting
-				if(instr.arg0 == StatGen.COPY) {
+				statements[line] = StatGen.Extern(nodeDef, portExprs);
+				if(instr.arg0 == StatGen.COPY) { // COPY casting
 					var assign = (CodeAssignStatement)statements[line];
 					var sourceType = symbolFromName[instr.args[0]].type;
 					var targetType = symbolFromName[instr.args[1]].type;
 					if(!targetType.IsAssignableFrom(sourceType))
-						assign.Right = new CodeCastExpression(targetType, assign.Right);
+						assign.Right = new CodeCastExpression(ExprGen.Type(targetType), assign.Right);
 				}
-				SimplifyStatement(line);
-
+				simplifyExtern(line);
 			} else if(instr.opcode == Opcode.CALL) {
 				Debug.Assert(instr.args == null);
 				statements[line] = new CodeExpressionStatement(new CodeDelegateInvokeExpression(
 					entryExprs[ctrlFlow.entries[ir.irLineFromAddr[instr.arg0]]]));
 			} else if(instr.opcode == Opcode.JUMP || instr.opcode == Opcode.EXIT || instr.opcode == Opcode.RETURN) {
-				var paramExprs = new CodeExpression[]{new CodePrimitiveExpression(true)};
-				if(instr.args != null) {
-					paramExprs[0] = symbolExprs[instr.args[0]];
-					SimplifyInParameters(line, paramExprs);
-					paramExprs[0] = ExprGen.Not(paramExprs[0]);
-				}
+				var condExpr = portExprs == null ? ExprGen.True : ExprGen.Not(portExprs[0]);
 				if(ctrlFlow.jumpTypes[line] == JumpType.Loop)
-					statements[line] = StatGen.If(ExprGen.Not(paramExprs[0]), StatGen.Break);
+					statements[line] = StatGen.If(ExprGen.Not(condExpr), StatGen.Break);
 				else if(ctrlFlow.jumpTypes[line] == JumpType.If)
-					statements[line] = new CodeConditionStatement(ExprGen.Not(paramExprs[0]));
+					statements[line] = new CodeConditionStatement(ExprGen.Not(condExpr));
 				else if(ctrlFlow.jumpTypes[line] == JumpType.Else)
 					statements[line] = new CodeConditionStatement(); // stub
 				else {
-					statements[line] = StatGen.If(paramExprs[0],
-						ctrlFlow.jumpTypes[line] == JumpType.Break ? 
-							StatGen.Break :
-						ctrlFlow.jumpTypes[line] == JumpType.Continue ?
-							StatGen.Continue :
-						instr.opcode == Opcode.EXIT || instr.opcode == Opcode.RETURN ?
-							(CodeStatement) new CodeMethodReturnStatement() :
-							new CodeGotoStatement(ctrlFlow.labels[ir.irLineFromAddr[instr.arg0]]));
+					if(ctrlFlow.jumpTypes[line] == JumpType.Break)
+						statements[line] = StatGen.Break;
+					else if(ctrlFlow.jumpTypes[line] == JumpType.Continue)
+						statements[line] = StatGen.Continue;
+					else if(instr.opcode == Opcode.EXIT || instr.opcode == Opcode.RETURN)
+						statements[line] = StatGen.Return;
+					else
+						statements[line] = new CodeGotoStatement(ctrlFlow.labels[ir.irLineFromAddr[instr.arg0]]);
+					statements[line] = StatGen.If(condExpr, statements[line]);
 				}
 			} else {
 				Debug.LogError(instr);
 			}
 		}
 	}
-	public void CreateBlocks(int line, CodeStatementCollection scope0) {
-		var statFromScope = new Dictionary<CodeStatementCollection, CodeStatement>();
-		var scopes = new Stack<CodeStatementCollection>(new[]{scope0});
-		for(; line<ir.irCode.Length; line++) {
-			for(int i=ctrlFlow.choiceEnd[line]; i>0; i--) {
-				var cond = (CodeConditionStatement)statFromScope[scopes.Pop()];
-				if(cond.TrueStatements.Count == 0) {
-					cond.Condition = ExprGen.Not(cond.Condition);
-					cond.TrueStatements.AddRange(cond.FalseStatements);
-					cond.FalseStatements.Clear();
-				}
-				if(cond.TrueStatements.Count == 1 && cond.FalseStatements.Count == 0) {
-					var assign = cond.TrueStatements[0] as CodeAssignStatement;
-					var op = assign?.Right as CodeBinaryOperatorExpression;
-					if(op != null && assign.Left == op.Left) {
-						var shortCircuit = 
-							op.Operator == CodeBinaryOperatorType.BooleanAnd ? op.Left == cond.Condition :
-							op.Operator == CodeBinaryOperatorType.BooleanOr && op.Left == ExprGen.Not(cond.Condition);
-						if(shortCircuit) {
-							var scope = scopes.Peek();
-							scope[scope.Count-1] = assign;
-							if(scope.Count >= 2) {
-								var assign2 = scope[scope.Count-2] as CodeAssignStatement;
-								if(assign2?.Left == assign.Left) {
-									op.Left = assign2.Right;
-									scope.RemoveAt(scope.Count-2);
-								}
-							}
+	void simplifyCond(CodeConditionStatement cond, CodeStatementCollection scope) {
+		if(cond.TrueStatements.Count == 0) {
+			cond.Condition = ExprGen.Not(cond.Condition);
+			cond.TrueStatements.AddRange(cond.FalseStatements);
+			cond.FalseStatements.Clear();
+		}
+		if(cond.TrueStatements.Count == 1 && cond.FalseStatements.Count == 0) {
+			var assign = cond.TrueStatements[0] as CodeAssignStatement;
+			var op = assign?.Right as CodeBinaryOperatorExpression;
+			if(op != null && assign.Left == op.Left) {
+				var shortCircuit = 
+					op.Operator == CodeBinaryOperatorType.BooleanAnd ? op.Left == cond.Condition :
+					op.Operator == CodeBinaryOperatorType.BooleanOr && op.Left == ExprGen.Not(cond.Condition);
+				if(shortCircuit) {
+					scope[scope.Count-1] = assign;
+					if(scope.Count >= 2) {
+						var assign2 = scope[scope.Count-2] as CodeAssignStatement;
+						if(assign2?.Left == assign.Left) {
+							op.Left = assign2.Right;
+							scope.RemoveAt(scope.Count-2);
 						}
 					}
 				}
 			}
+		}
+	}
+	void simplifyIter(CodeIterationStatement iter, CodeStatementCollection scope) {
+		if(iter.Statements.Count == 0)
+			return;
+		var cond = iter.Statements[0] as CodeConditionStatement;
+		if(cond != null && cond.TrueStatements.Count == 1 && cond.FalseStatements.Count == 0)
+			if(cond.TrueStatements[0] == StatGen.Break) {
+				iter.Statements.RemoveAt(0);
+				iter.TestExpression = ExprGen.Not(cond.Condition);
+			}
+		var iterVar = (iter.TestExpression as CodeBinaryOperatorExpression)?.Left;
+		if(iterVar != null) {
+			if(iter.Statements.Count > 0) {
+				var assign = iter.Statements[iter.Statements.Count-1] as CodeAssignStatement;
+				if(assign?.Left == iterVar) {
+					iter.Statements.RemoveAt(iter.Statements.Count-1);
+					iter.IncrementStatement = assign;
+				}
+			}
+			if(scope.Count > 1) {
+				var assign = scope[scope.Count-2] as CodeAssignStatement;
+				if(assign?.Left == iterVar) {
+					scope.RemoveAt(scope.Count-2);
+					iter.InitStatement = assign;
+				}
+			}
+		}
+	}
+	public int BuildFunc(int lineBegin, CodeStatementCollection scope0) {
+		var statFromScope = new Dictionary<CodeStatementCollection, CodeStatement>();
+		var scopes = new Stack<CodeStatementCollection>(new[]{scope0});
+		int line = lineBegin;
+		for(; line<ir.irCode.Length && (ctrlFlow.entries[line] == null || line==lineBegin); line++) {
+			for(int i=ctrlFlow.choiceEnd[line]; i>0; i--)
+				simplifyCond((CodeConditionStatement)statFromScope[scopes.Pop()], scopes.Peek());
 			if(ctrlFlow.labels[line] != null)
 				scopes.Peek().Add(new CodeLabeledStatement(ctrlFlow.labels[line]));
 			for(int i=ctrlFlow.loopBegin[line]; i>0; i--) {
@@ -378,33 +395,7 @@ public class Decompiler {
 			if(ctrlFlow.jumpTypes[line] == JumpType.Loop) {
 				if(statements[line] != null)
 					scopes.Peek().Add(statements[line]);
-				var iter = (CodeIterationStatement)statFromScope[scopes.Pop()];
-				if(iter.Statements.Count > 0) {
-					var cond = iter.Statements[0] as CodeConditionStatement;
-					if(cond != null && cond.TrueStatements.Count == 1 && cond.FalseStatements.Count == 0)
-						if(cond.TrueStatements[0] == StatGen.Break) {
-							iter.Statements.RemoveAt(0);
-							iter.TestExpression = ExprGen.Not(cond.Condition);
-						}
-					var iterVar = (iter.TestExpression as CodeBinaryOperatorExpression)?.Left;
-					if(iterVar != null) {
-						if(iter.Statements.Count > 0) {
-							var assign = iter.Statements[iter.Statements.Count-1] as CodeAssignStatement;
-							if(assign?.Left == iterVar) {
-								iter.Statements.RemoveAt(iter.Statements.Count-1);
-								iter.IncrementStatement = assign;
-							}
-						}
-						var scope = scopes.Peek();
-						if(scope.Count > 1) {
-							var assign = scope[scope.Count-2] as CodeAssignStatement;
-							if(assign?.Left == iterVar) {
-								scope.RemoveAt(scope.Count-2);
-								iter.InitStatement = assign;
-							}
-						}
-					}
-				}
+				simplifyIter((CodeIterationStatement)statFromScope[scopes.Pop()], scopes.Peek());
 			} else if(ctrlFlow.jumpTypes[line] == JumpType.If) {
 				var cond = (CodeConditionStatement)statements[line];
 				statFromScope[cond.TrueStatements] = cond;
@@ -416,52 +407,64 @@ public class Decompiler {
 			} else if(statements[line] != null) {
 				scopes.Peek().Add(statements[line]);
 			}
-			if(line+1 < ir.irCode.Length && ctrlFlow.entries[line+1] != null) {
-				if(ctrlFlow.entryContinue[line+1])
-					scopes.Peek().Add(new CodeExpressionStatement(new CodeDelegateInvokeExpression(
-						entryExprs[ctrlFlow.entries[line+1]])));
-				break;
-			}
 		}
+		return line;
 	}
-	public CodeMemberMethod BuildMethod(int line) {
-		Debug.Assert(ctrlFlow.entries[line] != null);
-		var entry = entryFromName[ctrlFlow.entries[line]];
+	public CodeMemberMethod BuildMethod(int lineBegin) {
+		var entry = entryFromName[ctrlFlow.entries[lineBegin]];
 		var method = entry.BuildMember();
-		CreateBlocks(line, method.Statements);
+		var scope = method.Statements;
+		var lineEnd = BuildFunc(lineBegin, scope);
+		if(lineEnd < ir.irCode.Length && ctrlFlow.entryContinue[lineEnd])
+			scope.Add(new CodeExpressionStatement(new CodeDelegateInvokeExpression(
+				entryExprs[ctrlFlow.entries[lineEnd]])));
+		if(scope.Count > 0 && scope[scope.Count-1] == StatGen.Return)
+			scope.RemoveAt(scope.Count-1);
 		return method;
 	}
 
 	public void GenerateCode(System.IO.TextWriter writer) {
-		var usedSymbols = new HashSet<Symbol>();
+		var usedIdentifiers = new HashSet<string>();
 
 		writer.WriteLine($"public class {name} : UdonSharp.UdonSharpBehaviour {{");
 
-		string methodCode;
-		using(var stringWriter = new System.IO.StringWriter()) {
-			using(var indentWriter = new IndentedTextWriter(stringWriter, "\t")) {
-				indentWriter.Indent ++;
-				indentWriter.Write("\t");
-				for(int line=0; line<ir.irCode.Length; line++)
-					if(ctrlFlow.entries[line] != null)
-						ExprGen.GenerateCode(BuildMethod(line), indentWriter);
-			}
-			methodCode = Regex.Replace(StatGen.PatchOperator(stringWriter.ToString()),
-				@"var_(\w+)", m => {
-					var symbol = symbolFromName[m.Groups[1].Value];
-					usedSymbols.Add(symbol);
-					return symbol.ToString();
-				});
-		}
 		using(var indentWriter = new IndentedTextWriter(writer, "\t")) {
 			indentWriter.Indent ++;
 			indentWriter.Write("\t");
 			foreach(var symbol in symbols)
-				if(symbol.exported || usedSymbols.Contains(symbol))
+				if(symbol.exported) {
+					usedIdentifiers.Add(symbol.name);
 					ExprGen.GenerateCode(symbol.BuildMember(), indentWriter);
-			
+				}
 		}
-		writer.Write(methodCode);
+
+		var symbolFromVarName = new Dictionary<string, Symbol>();
+		foreach(var symbol in symbols)
+			symbolFromVarName[symbol.ToString()] = symbol;
+
+		foreach(var expr in symbolFromExpr.Keys)
+			expr.VariableName = "\uE000" + expr.VariableName;
+		for(int line=0; line<ir.irCode.Length; line++)
+			if(ctrlFlow.entries[line] != null) {
+				using(var stringWriter = new System.IO.StringWriter()) {
+					using(var indentWriter = new IndentedTextWriter(stringWriter, "\t")) {
+						indentWriter.Indent ++;
+						indentWriter.Write("\t");
+						ExprGen.GenerateCode(BuildMethod(line), indentWriter);
+					}
+					var code = StatGen.PatchOperator(stringWriter.ToString());
+					for(var m = Regex.Match(code, @"\uE000(\w+)", RegexOptions.Compiled); m.Success; m = m.NextMatch())
+						if(usedIdentifiers.Add(m.Groups[1].Value)) {
+							var symbol = symbolFromVarName[m.Groups[1].Value];
+							using(var indentWriter = new IndentedTextWriter(writer, "\t")) {
+								indentWriter.Indent ++;
+								indentWriter.Write("\t");
+								ExprGen.GenerateCode(symbol.BuildMember(), indentWriter);
+							}
+						}
+					writer.Write(code.Replace("\uE000", ""));
+				}
+			}
 
 		writer.WriteLine("}");
 	}

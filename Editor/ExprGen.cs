@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEditor;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.CodeDom;
 using System.CodeDom.Compiler;
 using VRC.Udon;
@@ -28,7 +29,6 @@ public class ExprGen {
 		{typeof(Vector4), 4}, {typeof(Quaternion), 4},
 		{typeof(Color32), 4}, {typeof(Color), 4}, 
 	};
-	
 	public static CodeExpression Ref(object value) {
 		var type = value?.GetType();
 		if(value == null || type.IsPrimitive || value is string || value is decimal)
@@ -37,12 +37,12 @@ public class ExprGen {
 			if(type.IsEnum) {
 				var name = System.Enum.GetName(type, value);
 				if(name == null)
-					return new CodeCastExpression(type, new CodePrimitiveExpression((int)value));
-				return new CodePropertyReferenceExpression(new CodeTypeReferenceExpression(type), name);
+					return new CodeCastExpression(Type(type), new CodePrimitiveExpression((int)value));
+				return new CodeFieldReferenceExpression(new CodeTypeReferenceExpression(Type(type)), name);
 			}
 			if(vectorTypeSizes.TryGetValue(type, out var size)) {
 				var indexer = type.GetProperty("Item");
-				var expr = new CodeObjectCreateExpression(type);
+				var expr = new CodeObjectCreateExpression(Type(type));
 				for(int i=0; i<size; i++)
 					expr.Parameters.Add(new CodePrimitiveExpression(indexer.GetValue(value, new object[]{i})));
 				return expr;
@@ -51,7 +51,7 @@ public class ExprGen {
 		} else {
 			switch(value) {
 			case System.Type t:
-				return new CodeTypeOfExpression(t);
+				return new CodeTypeOfExpression(Type(t));
 			case UdonGameObjectComponentHeapReference heapRef:
 				switch(heapRef.type.Name) {
 				case nameof(GameObject):
@@ -80,21 +80,8 @@ public class ExprGen {
 			return refValue;
 		var type = value.GetType();
 		if(type.IsArray) {
-			// var elemType = type.GetElementType();
-			// var elemDef = elemType.IsValueType ? System.Activator.CreateInstance(elemType) : null;
-			// var arr = (System.Array)value;
-			// var n = arr.GetLength(0);
-			// for(int i=0; i<n; i++)
-			// 	if(!arr.GetValue(i).Equals(elemDef)) {
-			// 		var exprs = new CodeExpression[n];
-			// 		for(int j=0; j<n; j++)
-			// 			exprs[j] = Value(arr.GetValue(j));
-			// 		return new CodeArrayCreateExpression(type, exprs);
-			// 	}
-			// return new CodeArrayCreateExpression(type, n);
-
 			var array = (System.Array)value;
-			var expr = new CodeArrayCreateExpression(type, array.GetLength(0));
+			var expr = new CodeArrayCreateExpression(Type(type), array.GetLength(0));
 			if(!IsArrayZero(array))
 				for(int i=0; i<expr.Size; i++)
 					expr.Initializers.Add(Value(array.GetValue(i)));
@@ -102,57 +89,17 @@ public class ExprGen {
 		}
 		switch(value) {
 		case VRC.SDKBase.VRCUrl url:
-			return new CodeObjectCreateExpression(type, new CodePrimitiveExpression(url.Get()));
+			return new CodeObjectCreateExpression(Type(type), new CodePrimitiveExpression(url.Get()));
 		// TODO: AnimationCurve, Gradient
 		}
 		return new CodeSnippetExpression($"???{value}???");
 	}
-	public static bool SideEffect(CodeExpression expr) {
-		switch(expr) {
-		case CodeTypeReferenceExpression _:
-		case CodeTypeOfExpression _:
-		case CodeVariableReferenceExpression _:
-		case CodePrimitiveExpression _:
-			return false;
 
-		case CodeBinaryOperatorExpression e:
-			return SideEffect(e.Left) || SideEffect(e.Right);
-		case CodeCastExpression e:
-			return SideEffect(e.Expression);
-		case CodePropertyReferenceExpression e:
-			return SideEffect(e.TargetObject);
-
-		case CodeArrayIndexerExpression e:
-			foreach(CodeExpression x in e.Indices)
-				if(SideEffect(x))
-					return true;
-			return SideEffect(e.TargetObject);
-		case CodeIndexerExpression e:
-			foreach(CodeExpression x in e.Indices)
-				if(SideEffect(x))
-					return true;
-			return SideEffect(e.TargetObject);
-
-		case CodeArrayCreateExpression e:
-			foreach(CodeExpression x in e.Initializers)
-				if(SideEffect(x))
-					return true;
-			return SideEffect(e.SizeExpression);
-		case CodeObjectCreateExpression e:
-			foreach(CodeExpression x in e.Parameters)
-				if(SideEffect(x))
-					return true;
-			return false;
-		case CodeMethodInvokeExpression e:
-			foreach(CodeExpression x in e.Parameters)
-				if(SideEffect(x))
-					return true;
-			return SideEffect(e.Method.TargetObject);
-		
-		default:
-			return true;
-		}
+	public static CodeTypeReference Type(System.Type type) {
+		// TODO: namespace stripper
+		return new CodeTypeReference(type);
 	}
+
 	public static void GenerateCode(CodeObject obj, System.IO.TextWriter writer) {
 		using(var provider = CodeDomProvider.CreateProvider("CSharp")) {
 			var options = new CodeGeneratorOptions();

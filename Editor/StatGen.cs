@@ -56,7 +56,7 @@ public class StatGen {
 		var name = nodeDef.name.Split(' ').Last();
 		var paramDefs = nodeDef.parameters;
 		var paramExprsSkipLast = paramExprs.Take(paramDefs.Count-1);
-		var typeExpr = (CodeExpression)new CodeTypeReferenceExpression(type);
+		var typeExpr = new CodeTypeReferenceExpression(ExprGen.Type(type));
 		if(name == "op_UnaryNegation" && type == typeof(bool))
 			name = "op_LogicalNot";
 
@@ -76,10 +76,10 @@ public class StatGen {
 			else if(name == "op_Implicit")
 				rhs = paramExprs[0]; // TODO: will this cause problem?
 			else if(name == "op_Explicit")
-				rhs = new CodeCastExpression(paramDefs[1].type, paramExprs[0]);
+				rhs = new CodeCastExpression(ExprGen.Type(paramDefs[1].type), paramExprs[0]);
 			else if(name == "ctor")
-				rhs = type.IsArray ? new CodeArrayCreateExpression(type, paramExprs[0]) : // only 1d is supported
-					(CodeExpression) new CodeObjectCreateExpression(type, paramExprsSkipLast.ToArray());
+				rhs = type.IsArray ? new CodeArrayCreateExpression(ExprGen.Type(type), paramExprs[0]) : // only 1d is supported
+					(CodeExpression) new CodeObjectCreateExpression(ExprGen.Type(type), paramExprsSkipLast.ToArray());
 			if(rhs != null)
 				lhs = paramExprs[paramDefs.Count-1];
 		}
@@ -150,6 +150,7 @@ public class StatGen {
 	}
 	public static CodeStatement Break = new CodeExpressionStatement(new CodeSnippetExpression("break"));
 	public static CodeStatement Continue = new CodeExpressionStatement(new CodeSnippetExpression("continue"));
+	public static CodeStatement Return = new CodeMethodReturnStatement();
 	static CodeStatement noop = new CodeExpressionStatement(new CodeSnippetExpression(""));
 	public static CodeIterationStatement While() {
 		return new CodeIterationStatement(noop, ExprGen.True, noop);

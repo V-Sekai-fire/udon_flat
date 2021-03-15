@@ -129,20 +129,6 @@ public class CtrlFlow {
 			}
 	}
 
-	public HashSet<int> jumpTargets;
-	void MarkJumpTargets() {
-		var reUdonCall = new Regex(@"\.__SendCustom(Network)?Event");
-		jumpTargets = new HashSet<int>();
-		foreach(var instr in ir.irCode) {
-			int line = ir.irLineFromAddr[instr.addr];
-			if(entries[line] != null)
-				jumpTargets.Add(line);
-			if(instr.opcode == Opcode.CALL || instr.opcode == Opcode.JUMP)
-				jumpTargets.Add(ir.irLineFromAddr[instr.arg0]);
-			if(instr.opcode == Opcode.CALL || (instr.opcode == Opcode.EXTERN && reUdonCall.IsMatch(instr.arg0)))
-				jumpTargets.Add(line+1);
-		}
-	}
 	public void Analyze() {
 		MarkEntries();
 
@@ -151,7 +137,6 @@ public class CtrlFlow {
 		LocateChoices();
 		LocateBreaks();
 		MarkLabels();
-		MarkJumpTargets();
 	}
 }
 }

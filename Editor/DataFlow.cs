@@ -13,10 +13,41 @@ public class DataFlow {
 	public IRGen ir;
 	public CtrlFlow ctrlFlow;
 
+	HashSet<int> branchTargets;
+	void MarkBranchTargets() {
+		var reUdonCall = new Regex(@"\.__(SendCustom(Network)?Event|SetProgramVariable)", RegexOptions.Compiled);
+		branchTargets = new HashSet<int>();
+		foreach(var instr in ir.irCode) {
+			int line = ir.irLineFromAddr[instr.addr];
+			if(ctrlFlow.entries[line] != null)
+				branchTargets.Add(line);
+			if(instr.opcode == Opcode.CALL || instr.opcode == Opcode.JUMP)
+				branchTargets.Add(ir.irLineFromAddr[instr.arg0]);
+			if(instr.opcode == Opcode.CALL || (instr.opcode == Opcode.EXTERN && reUdonCall.IsMatch(instr.arg0)))
+				branchTargets.Add(line+1);
+		}
+		branchTargets.Add(ir.irCode.Length);
+	}
+
+	public HashSet<string> sharedSymbols;
+	void MarkSharedSymbols() {
+		var reProgramVariable = new Regex(@"\.__(Get|Set)ProgramVariable", RegexOptions.Compiled);
+		sharedSymbols = new HashSet<string>(program.SymbolTable.GetExportedSymbols()); // exported symbols are shared
+		foreach(var meta in program.SyncMetadataTable.GetAllSyncMetadata())
+			sharedSymbols.Add(meta.Name); // synced symbols are shared
+		foreach(var instr in ir.irCode)
+			if(instr.opcode == Opcode.EXTERN && reProgramVariable.IsMatch(instr.arg0)) {
+				var addr = program.SymbolTable.GetAddressFromSymbol(instr.args[1]);
+				var value = program.Heap.GetHeapVariable(addr) as string;
+				if(value != null)
+					sharedSymbols.Add(value); // ProgramVariable arguments are shared
+			}
+	}
+
 	public struct Port {
 		public int type;
-		public int outputRef;
-		public (int,int)? inputSrc;
+		public int outRefCount;
+		public (int,int)? inSource;
 	}
 	public Port[]   port0;
 	public Port[][] ports;
@@ -50,31 +81,31 @@ public class DataFlow {
 				for(int i=0; i<linePorts.Length; i++)
 					if((linePorts[i].type & 1) != 0)
 						if(outRecent.TryGetValue(instr.args[i], out var portTime))
-							linePorts[i].inputSrc = portTime.Item1;
+							linePorts[i].inSource = portTime.Item1;
 				for(int i=0; i<linePorts.Length; i++)
 					if((linePorts[i].type & 2) != 0) {
 						var symbol = instr.args[i];
 						if(outRecent.TryGetValue(symbol, out var portTime) && portTime.Item2 < epoch) {
 							if(!outEscaped.TryGetValue(symbol, out var lst))
 								outEscaped[symbol] = lst = new List<(int,int)>();
-							lst.Add(portTime.Item1); // flush lazy escape
+							lst.Add(portTime.Item1); // flush escape
 						}
 						outRecent[symbol] = ((line, i), epoch);
 					}
 			}
-			// escape after jump sources & before jump targets
+			// escape after branch sources & before branch targets
 			if(instr.opcode != Opcode.EXTERN)
 				epoch ++; // lazy escape
-			if(ctrlFlow.jumpTargets.Contains(line+1) || line+1 == ir.irCode.Length) {
+			if(branchTargets.Contains(line+1)) {
 				foreach(var symbolPortTime in outRecent) {
 					if(!outEscaped.TryGetValue(symbolPortTime.Key, out var lst))
 						outEscaped[symbolPortTime.Key] = lst = new List<(int,int)>();
-					lst.Add(symbolPortTime.Value.Item1); // flush lazy escape
+					lst.Add(symbolPortTime.Value.Item1); // flush escape
 				}
 				outRecent.Clear();
 			}
 		}
-		foreach(var symbol in program.SymbolTable.GetExportedSymbols()) // exported symbols are reachable
+		foreach(var symbol in sharedSymbols) // shared symbols are reachable
 			if(outEscaped.TryGetValue(symbol, out var lst)) {
 				outEscaped.Remove(symbol); // do it once
 				lst.ForEach(outReached.Enqueue);
@@ -84,9 +115,9 @@ public class DataFlow {
 		for(var visited = new HashSet<(int,int)>(); outReached.Count > 0; ) {
 			var head = outReached.Dequeue();
 			if(head.i >= 0) // output port
-				ports[head.line][head.i].outputRef ++;
+				ports[head.line][head.i].outRefCount ++;
 			else // statement port
-				port0[head.line].outputRef ++;
+				port0[head.line].outRefCount ++;
 			if(visited.Contains(head))
 				continue;
 			visited.Add(head);
@@ -97,9 +128,9 @@ public class DataFlow {
 			else // statement port
 				for(int i=0; i<linePorts.Length; i++)
 					if((linePorts[i].type & 1) != 0)
-						if(linePorts[i].inputSrc != null)
-							outReached.Enqueue(linePorts[i].inputSrc.Value);
-						else { // escaped input port
+						if(linePorts[i].inSource != null)
+							outReached.Enqueue(linePorts[i].inSource.Value);
+						else { // input port uses escaped value
 							var symbol = ir.irCode[head.line].args[i];
 							if(outEscaped.TryGetValue(symbol, out var lst)) {
 								outEscaped.Remove(symbol); // do it once
@@ -107,11 +138,6 @@ public class DataFlow {
 							}
 						}
 		}
-		// for(int line=0; line<ir.irCode.Length; line++) {
-		// 	var linePorts = ports[line];
-		// 	if(linePorts != null)
-		// 		Debug.Log($"{ir.irCode[line].addr}: {string.Join(", ", linePorts.Select(x => $"{((x.type&2) != 0 ? x.outputRef : -1)}"))} : {port0[line].outputRef} {ctrlFlow.jumpTargets.Contains(line)}");
-		// }
 	}
 
 	public class EventEntry {
@@ -144,23 +170,25 @@ public class DataFlow {
 		}
 	}
 
-	public HashSet<string> variables;
-	void MarkVariables() {
-		variables = new HashSet<string>(program.SymbolTable.GetExportedSymbols()); // exported symbols are variable
+	public HashSet<string> mutableSymbols;
+	void MarkMutableSymbols() {
+		mutableSymbols = new HashSet<string>(sharedSymbols); // shared symbols are mutable
 		for(int line=0; line<ir.irCode.Length; line++)
 			if(ports[line] != null)
 				for(int i=0; i<ports[line].Length; i++)
 					if((ports[line][i].type & 2) != 0)
-						variables.Add(ir.irCode[line].args[i]); // out ports are variable
+						mutableSymbols.Add(ir.irCode[line].args[i]); // out ports are mutable
 		foreach(var eventEntry in eventFromEntry.Values)
 			foreach(var symbol in eventEntry.symbolNames)
-				variables.Add(symbol); // event inputs are variable
+				mutableSymbols.Add(symbol); // event inputs are mutable
 	}
 	public void Analyze() {
+		MarkBranchTargets();
+		MarkSharedSymbols();
 		BuildFlowGraph();
 		SearchFlowGraph();
 		GetEvents();
-		MarkVariables();
+		MarkMutableSymbols();
 	}
 }
 }
