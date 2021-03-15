@@ -1,5 +1,4 @@
 using UnityEngine;
-using UnityEditor;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -10,7 +9,7 @@ using VRC.Udon.Graph;
 using VRC.Udon.Editor;
 
 namespace UdonFlat {
-public class Symbol {
+public class Symbol: System.IComparable<Symbol> {
 	public string name;
 	public uint addr;
 	public System.Type type;
@@ -89,6 +88,9 @@ public class Symbol {
 				return null;
 		return elemType;
 	}
+	public int CompareTo(Symbol other) {
+		return addr.CompareTo(other.addr);
+	}
 }
 public class Entry {
 	public string name;
@@ -120,7 +122,7 @@ public class Entry {
 			method.Attributes |= MemberAttributes.Private;
 
 		if(eventEntry != null) {
-			if(!monoBehaviourMessages.Contains(eventEntry.eventName)) {
+			if(vrcEventNames.Contains(eventEntry.eventName)) {
 				method.Attributes &= ~MemberAttributes.Final;
 				method.Attributes |= MemberAttributes.Override;
 			}
@@ -130,30 +132,13 @@ public class Entry {
 		}
 		return method;
 	}
-	// https://docs.unity3d.com/ScriptReference/MonoBehaviour.html
-	static HashSet<string> monoBehaviourMessages = new HashSet<string>{
-"Awake", "FixedUpdate", "LateUpdate", "OnAnimatorIK", "OnAnimatorMove",
-"OnApplicationFocus", "OnApplicationPause", "OnApplicationQuit", "OnAudioFilterRead",
-"OnBecameInvisible", "OnBecameVisible", "OnCollisionEnter", "OnCollisionEnter2D",
-"OnCollisionExit", "OnCollisionExit2D", "OnCollisionStay", "OnCollisionStay2D",
-"OnConnectedToServer", "OnControllerColliderHit", "OnDestroy", "OnDisable", "OnDisconnectedFromServer",
-"OnDrawGizmos", "OnDrawGizmosSelected", "OnEnable", "OnFailedToConnect", "OnFailedToConnectToMasterServer",
-"OnGUI", "OnJointBreak", "OnJointBreak2D", "OnMasterServerEvent", "OnMouseDown", "OnMouseDrag",
-"OnMouseEnter", "OnMouseExit", "OnMouseOver", "OnMouseUp", "OnMouseUpAsButton", "OnNetworkInstantiate",
-"OnParticleCollision", "OnParticleSystemStopped", "OnParticleTrigger", "OnPlayerConnected", "OnPlayerDisconnected",
-"OnPostRender", "OnPreCull", "OnPreRender", "OnRenderImage", "OnRenderObject", "OnSerializeNetworkView",
-"OnServerInitialized", "OnTransformChildrenChanged", "OnTransformParentChanged",
-"OnTriggerEnter", "OnTriggerEnter2D", "OnTriggerExit", "OnTriggerExit2D", "OnTriggerStay", "OnTriggerStay2D",
-"OnValidate", "OnWillRenderObject", "Reset", "Start", "Update"
-	};
+	static HashSet<string> vrcEventNames = new HashSet<string>(
+		UdonEditorManager.Instance.GetNodeRegistries().Where(kv => kv.Key.StartsWith("VRCEvent"))
+			.SelectMany(kv => kv.Value.GetNodeDefinitions().Select(nodeDef => nodeDef.name)));
 }
 public class Decompiler {
 	public IUdonProgram program;
 	public string name = "Unnamed";
-
-	public static UdonNodeDefinition GetNodeDefinition(string fullName) {
-		return UdonEditorManager.Instance.GetNodeDefinition(fullName);
-	}
 
 	public IRGen ir;
 	public CtrlFlow ctrlFlow;
@@ -191,14 +176,16 @@ public class Decompiler {
 	}
 
 	public void Init() {
-		ir = new IRGen{program=program};
-		ir.Disassemble();
+		var asm = new Disassembler{program=program};
+		asm.Disassemble();
+
+		ir = new IRGen{program=program, asm=asm};
 		ir.Generate();
 
 		ctrlFlow = new CtrlFlow{program=program, ir=ir};
 		ctrlFlow.Analyze();
 
-		dataFlow = new DataFlow{program=program, ir=ir, ctrlFlow=ctrlFlow};
+		dataFlow = new DataFlow{program=program, ir=ir};
 		dataFlow.Analyze();
 
 		InitSymbols();
@@ -274,9 +261,9 @@ public class Decompiler {
 		foreach(var entry in entries)
 			entryExprs[entry.name] = new CodeVariableReferenceExpression(entry.ToString());
 
-		statements = new CodeStatement[ir.irCode.Length];
-		for(int line=0; line<ir.irCode.Length; line++) {
-			var instr = ir.irCode[line];
+		statements = new CodeStatement[ir.code.Length];
+		for(int line=0; line<ir.code.Length; line++) {
+			var instr = ir.code[line];
 			var portExprs = default(CodeExpression[]);
 			if(dataFlow.ports[line] != null) {
 				portExprs = System.Array.ConvertAll(instr.args, s => (CodeExpression)symbolExprs[s]);
@@ -286,7 +273,7 @@ public class Decompiler {
 			if(instr.opcode == Opcode.EXTERN) {
 				if(dataFlow.port0[line].outRefCount == 0)
 					continue;
-				var nodeDef = GetNodeDefinition(instr.arg0);
+				var nodeDef = UdonEditorManager.Instance.GetNodeDefinition(instr.arg0);
 				statements[line] = StatGen.Extern(nodeDef, portExprs);
 				if(instr.arg0 == StatGen.COPY) { // COPY casting
 					var assign = (CodeAssignStatement)statements[line];
@@ -299,7 +286,7 @@ public class Decompiler {
 			} else if(instr.opcode == Opcode.CALL) {
 				Debug.Assert(instr.args == null);
 				statements[line] = new CodeExpressionStatement(new CodeDelegateInvokeExpression(
-					entryExprs[ctrlFlow.entries[ir.irLineFromAddr[instr.arg0]]]));
+					entryExprs[ctrlFlow.entries[ir.lineFromAddr[instr.arg0]]]));
 			} else if(instr.opcode == Opcode.JUMP || instr.opcode == Opcode.EXIT || instr.opcode == Opcode.RETURN) {
 				var condExpr = portExprs == null ? ExprGen.True : ExprGen.Not(portExprs[0]);
 				if(ctrlFlow.jumpTypes[line] == JumpType.Loop)
@@ -316,7 +303,7 @@ public class Decompiler {
 					else if(instr.opcode == Opcode.EXIT || instr.opcode == Opcode.RETURN)
 						statements[line] = StatGen.Return;
 					else
-						statements[line] = new CodeGotoStatement(ctrlFlow.labels[ir.irLineFromAddr[instr.arg0]]);
+						statements[line] = new CodeGotoStatement(ctrlFlow.labels[ir.lineFromAddr[instr.arg0]]);
 					statements[line] = StatGen.If(condExpr, statements[line]);
 				}
 			} else {
@@ -324,66 +311,13 @@ public class Decompiler {
 			}
 		}
 	}
-	void simplifyCond(CodeConditionStatement cond, CodeStatementCollection scope) {
-		if(cond.TrueStatements.Count == 0) {
-			cond.Condition = ExprGen.Not(cond.Condition);
-			cond.TrueStatements.AddRange(cond.FalseStatements);
-			cond.FalseStatements.Clear();
-		}
-		if(cond.TrueStatements.Count == 1 && cond.FalseStatements.Count == 0) {
-			var assign = cond.TrueStatements[0] as CodeAssignStatement;
-			var op = assign?.Right as CodeBinaryOperatorExpression;
-			if(op != null && assign.Left == op.Left) {
-				var shortCircuit = 
-					op.Operator == CodeBinaryOperatorType.BooleanAnd ? op.Left == cond.Condition :
-					op.Operator == CodeBinaryOperatorType.BooleanOr && op.Left == ExprGen.Not(cond.Condition);
-				if(shortCircuit) {
-					scope[scope.Count-1] = assign;
-					if(scope.Count >= 2) {
-						var assign2 = scope[scope.Count-2] as CodeAssignStatement;
-						if(assign2?.Left == assign.Left) {
-							op.Left = assign2.Right;
-							scope.RemoveAt(scope.Count-2);
-						}
-					}
-				}
-			}
-		}
-	}
-	void simplifyIter(CodeIterationStatement iter, CodeStatementCollection scope) {
-		if(iter.Statements.Count == 0)
-			return;
-		var cond = iter.Statements[0] as CodeConditionStatement;
-		if(cond != null && cond.TrueStatements.Count == 1 && cond.FalseStatements.Count == 0)
-			if(cond.TrueStatements[0] == StatGen.Break) {
-				iter.Statements.RemoveAt(0);
-				iter.TestExpression = ExprGen.Not(cond.Condition);
-			}
-		var iterVar = (iter.TestExpression as CodeBinaryOperatorExpression)?.Left;
-		if(iterVar != null) {
-			if(iter.Statements.Count > 0) {
-				var assign = iter.Statements[iter.Statements.Count-1] as CodeAssignStatement;
-				if(assign?.Left == iterVar) {
-					iter.Statements.RemoveAt(iter.Statements.Count-1);
-					iter.IncrementStatement = assign;
-				}
-			}
-			if(scope.Count > 1) {
-				var assign = scope[scope.Count-2] as CodeAssignStatement;
-				if(assign?.Left == iterVar) {
-					scope.RemoveAt(scope.Count-2);
-					iter.InitStatement = assign;
-				}
-			}
-		}
-	}
 	public int BuildFunc(int lineBegin, CodeStatementCollection scope0) {
 		var statFromScope = new Dictionary<CodeStatementCollection, CodeStatement>();
 		var scopes = new Stack<CodeStatementCollection>(new[]{scope0});
 		int line = lineBegin;
-		for(; line<ir.irCode.Length && (ctrlFlow.entries[line] == null || line==lineBegin); line++) {
+		for(; line<ir.code.Length && (ctrlFlow.entries[line] == null || line==lineBegin); line++) {
 			for(int i=ctrlFlow.choiceEnd[line]; i>0; i--)
-				simplifyCond((CodeConditionStatement)statFromScope[scopes.Pop()], scopes.Peek());
+				StatOpt.RewriteCond((CodeConditionStatement)statFromScope[scopes.Pop()], scopes.Peek());
 			if(ctrlFlow.labels[line] != null)
 				scopes.Peek().Add(new CodeLabeledStatement(ctrlFlow.labels[line]));
 			for(int i=ctrlFlow.loopBegin[line]; i>0; i--) {
@@ -395,7 +329,7 @@ public class Decompiler {
 			if(ctrlFlow.jumpTypes[line] == JumpType.Loop) {
 				if(statements[line] != null)
 					scopes.Peek().Add(statements[line]);
-				simplifyIter((CodeIterationStatement)statFromScope[scopes.Pop()], scopes.Peek());
+				StatOpt.RewriteIter((CodeIterationStatement)statFromScope[scopes.Pop()], scopes.Peek());
 			} else if(ctrlFlow.jumpTypes[line] == JumpType.If) {
 				var cond = (CodeConditionStatement)statements[line];
 				statFromScope[cond.TrueStatements] = cond;
@@ -415,7 +349,7 @@ public class Decompiler {
 		var method = entry.BuildMember();
 		var scope = method.Statements;
 		var lineEnd = BuildFunc(lineBegin, scope);
-		if(lineEnd < ir.irCode.Length && ctrlFlow.entryContinue[lineEnd])
+		if(lineEnd < ir.code.Length && ctrlFlow.entryContinue[lineEnd])
 			scope.Add(new CodeExpressionStatement(new CodeDelegateInvokeExpression(
 				entryExprs[ctrlFlow.entries[lineEnd]])));
 		if(scope.Count > 0 && scope[scope.Count-1] == StatGen.Return)
@@ -424,49 +358,51 @@ public class Decompiler {
 	}
 
 	public void GenerateCode(System.IO.TextWriter writer) {
-		var usedIdentifiers = new HashSet<string>();
-
-		writer.WriteLine($"public class {name} : UdonSharp.UdonSharpBehaviour {{");
+		var symbolFromIdentifier = new Dictionary<string, Symbol>();
+		foreach(var symbol in symbols)
+			symbolFromIdentifier[symbol.ToString()] = symbol;
 
 		using(var indentWriter = new IndentedTextWriter(writer, "\t")) {
+			indentWriter.WriteLine($"public class {name} : UdonSharp.UdonSharpBehaviour {{");
 			indentWriter.Indent ++;
-			indentWriter.Write("\t");
+
+			var identifierSet = new HashSet<string>();
+			var symbolList = new List<Symbol>();
 			foreach(var symbol in symbols)
-				if(symbol.exported) {
-					usedIdentifiers.Add(symbol.name);
-					ExprGen.GenerateCode(symbol.BuildMember(), indentWriter);
-				}
-		}
+				if(dataFlow.sharedSymbols.Contains(symbol.name) && identifierSet.Add(symbol.ToString()))
+					symbolList.Add(symbol);
+			symbolList.Sort();
+			foreach(var symbol in symbolList)
+				ExprGen.GenerateCode(symbol.BuildMember(), indentWriter);
 
-		var symbolFromVarName = new Dictionary<string, Symbol>();
-		foreach(var symbol in symbols)
-			symbolFromVarName[symbol.ToString()] = symbol;
-
-		foreach(var expr in symbolFromExpr.Keys)
-			expr.VariableName = "\uE000" + expr.VariableName;
-		for(int line=0; line<ir.irCode.Length; line++)
-			if(ctrlFlow.entries[line] != null) {
-				using(var stringWriter = new System.IO.StringWriter()) {
-					using(var indentWriter = new IndentedTextWriter(stringWriter, "\t")) {
-						indentWriter.Indent ++;
-						indentWriter.Write("\t");
-						ExprGen.GenerateCode(BuildMethod(line), indentWriter);
-					}
-					var code = StatGen.PatchOperator(stringWriter.ToString());
-					for(var m = Regex.Match(code, @"\uE000(\w+)", RegexOptions.Compiled); m.Success; m = m.NextMatch())
-						if(usedIdentifiers.Add(m.Groups[1].Value)) {
-							var symbol = symbolFromVarName[m.Groups[1].Value];
-							using(var indentWriter = new IndentedTextWriter(writer, "\t")) {
-								indentWriter.Indent ++;
-								indentWriter.Write("\t");
-								ExprGen.GenerateCode(symbol.BuildMember(), indentWriter);
-							}
+			const string escapeChar = "\uE000";
+			foreach(var expr in symbolFromExpr.Keys)
+				expr.VariableName = escapeChar + expr.VariableName;
+			for(int line=0; line<ir.code.Length; line++)
+				if(ctrlFlow.entries[line] != null) {
+					using(var stringWriter = new System.IO.StringWriter()) {
+						using(var indentStringWriter = new IndentedTextWriter(stringWriter, "\t")) {
+							indentStringWriter.Indent ++;
+							ExprGen.GenerateCode(BuildMethod(line), indentStringWriter);
 						}
-					writer.Write(code.Replace("\uE000", ""));
-				}
-			}
+						var code = stringWriter.ToString();
 
-		writer.WriteLine("}");
+						symbolList.Clear();
+						var m = Regex.Match(code, Regex.Escape(escapeChar) + @"(\w+)", RegexOptions.Compiled);
+						for(; m.Success; m = m.NextMatch())
+							if(identifierSet.Add(m.Groups[1].Value))
+								symbolList.Add(symbolFromIdentifier[m.Groups[1].Value]);
+						symbolList.Sort();
+						indentWriter.WriteLine();
+						foreach(var symbol in symbolList)
+							ExprGen.GenerateCode(symbol.BuildMember(), indentWriter);
+						indentWriter.Write(StatGen.PatchOperator(code.Replace(escapeChar, "")));
+					}
+				}
+
+			indentWriter.Indent --;
+			indentWriter.WriteLine("}");
+		}
 	}
 }
 }

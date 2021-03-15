@@ -1,5 +1,4 @@
 using UnityEngine;
-using UnityEditor;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -11,32 +10,30 @@ namespace UdonFlat {
 public class DataFlow {
 	public IUdonProgram program;
 	public IRGen ir;
-	public CtrlFlow ctrlFlow;
 
 	HashSet<int> branchTargets;
 	void MarkBranchTargets() {
 		var reUdonCall = new Regex(@"\.__(SendCustom(Network)?Event|SetProgramVariable)", RegexOptions.Compiled);
-		branchTargets = new HashSet<int>();
-		foreach(var instr in ir.irCode) {
-			int line = ir.irLineFromAddr[instr.addr];
-			if(ctrlFlow.entries[line] != null)
-				branchTargets.Add(line);
+		branchTargets = new HashSet<int>(new[]{ir.code.Length});
+		foreach(var name in program.EntryPoints.GetSymbols())
+			branchTargets.Add(ir.lineFromAddr[IRGen.FormatAddr(program.EntryPoints.GetAddressFromSymbol(name))]);
+		foreach(var instr in ir.code) {
+			int line = ir.lineFromAddr[instr.addr];
 			if(instr.opcode == Opcode.CALL || instr.opcode == Opcode.JUMP)
-				branchTargets.Add(ir.irLineFromAddr[instr.arg0]);
+				branchTargets.Add(ir.lineFromAddr[instr.arg0]);
 			if(instr.opcode == Opcode.CALL || (instr.opcode == Opcode.EXTERN && reUdonCall.IsMatch(instr.arg0)))
 				branchTargets.Add(line+1);
 		}
-		branchTargets.Add(ir.irCode.Length);
 	}
 
 	public HashSet<string> sharedSymbols;
 	void MarkSharedSymbols() {
-		var reProgramVariable = new Regex(@"\.__(Get|Set)ProgramVariable", RegexOptions.Compiled);
+		var reGetSetProgVar = new Regex(@"\.__(Get|Set)ProgramVariable", RegexOptions.Compiled);
 		sharedSymbols = new HashSet<string>(program.SymbolTable.GetExportedSymbols()); // exported symbols are shared
 		foreach(var meta in program.SyncMetadataTable.GetAllSyncMetadata())
 			sharedSymbols.Add(meta.Name); // synced symbols are shared
-		foreach(var instr in ir.irCode)
-			if(instr.opcode == Opcode.EXTERN && reProgramVariable.IsMatch(instr.arg0)) {
+		foreach(var instr in ir.code)
+			if(instr.opcode == Opcode.EXTERN && reGetSetProgVar.IsMatch(instr.arg0)) {
 				var addr = program.SymbolTable.GetAddressFromSymbol(instr.args[1]);
 				var value = program.Heap.GetHeapVariable(addr) as string;
 				if(value != null)
@@ -54,13 +51,13 @@ public class DataFlow {
 	Queue<(int line, int i)> outReached;
 	Dictionary<string, List<(int,int)>> outEscaped;
 	void BuildFlowGraph() {
-		port0 = new Port[ir.irCode.Length];
-		ports = new Port[ir.irCode.Length][];
+		port0 = new Port[ir.code.Length];
+		ports = new Port[ir.code.Length][];
 		outReached = new Queue<(int line, int i)>();
 		outEscaped = new Dictionary<string, List<(int,int)>>();
 		var outRecent = new Dictionary<string, ((int,int),int)>();
-		for(int epoch=0, line=0; line<ir.irCode.Length; line++) {
-			var instr = ir.irCode[line];
+		for(int epoch=0, line=0; line<ir.code.Length; line++) {
+			var instr = ir.code[line];
 			if(instr.args != null) {
 				var linePorts = ports[line] = new Port[instr.args.Length];
 				if(instr.opcode == Opcode.EXTERN) {
@@ -131,7 +128,7 @@ public class DataFlow {
 						if(linePorts[i].inSource != null)
 							outReached.Enqueue(linePorts[i].inSource.Value);
 						else { // input port uses escaped value
-							var symbol = ir.irCode[head.line].args[i];
+							var symbol = ir.code[head.line].args[i];
 							if(outEscaped.TryGetValue(symbol, out var lst)) {
 								outEscaped.Remove(symbol); // do it once
 								lst.ForEach(outReached.Enqueue);
@@ -149,35 +146,33 @@ public class DataFlow {
 	public Dictionary<string, EventEntry> eventFromEntry;
 	void GetEvents() {
 		eventFromEntry = new Dictionary<string, EventEntry>();
-		var nodeDefs = UdonEditorManager.Instance.GetNodeDefinitions();
-		foreach(var nodeDef in nodeDefs) {
-			var m = Regex.Match(nodeDef.fullName, @"^Event_(\w+)");
-			if(!m.Success)
-				continue;
-			var eventName = m.Groups[1].Value;
-			var entryName = "_" + eventName.Substring(0,1).ToLowerInvariant() + eventName.Substring(1);
-			if(!program.EntryPoints.HasExportedSymbol(entryName))
-				continue;
+		foreach(var kv in UdonEditorManager.Instance.GetNodeRegistries())
+			if(Regex.IsMatch(kv.Key, "^(VRC|Udon)Event"))
+				foreach(var nodeDef in kv.Value.GetNodeDefinitions()) {
+					var eventName = nodeDef.name;
+					var entryName = "_" + eventName.Substring(0,1).ToLowerInvariant() + eventName.Substring(1);
+					if(!program.EntryPoints.HasExportedSymbol(entryName))
+						continue;
 
-			var eventEntry = new EventEntry{eventName=eventName, entryName=entryName, nodeDef=nodeDef,
-				symbolNames=new string[nodeDef.parameters.Count]};
-			for(int i=0; i<nodeDef.parameters.Count; i++) {
-				var p = nodeDef.parameters[i];
-				eventEntry.symbolNames[i] = entryName.Substring(1)
-					+ p.name.Substring(0,1).ToUpperInvariant() + p.name.Substring(1);
-			}
-			eventFromEntry[entryName] = eventEntry;
-		}
+					var eventEntry = new EventEntry{eventName=eventName, entryName=entryName, nodeDef=nodeDef,
+						symbolNames=new string[nodeDef.parameters.Count]};
+					for(int i=0; i<nodeDef.parameters.Count; i++) {
+						var p = nodeDef.parameters[i];
+						eventEntry.symbolNames[i] = entryName.Substring(1)
+							+ p.name.Substring(0,1).ToUpperInvariant() + p.name.Substring(1);
+					}
+					eventFromEntry[entryName] = eventEntry;
+				}
 	}
 
 	public HashSet<string> mutableSymbols;
 	void MarkMutableSymbols() {
 		mutableSymbols = new HashSet<string>(sharedSymbols); // shared symbols are mutable
-		for(int line=0; line<ir.irCode.Length; line++)
+		for(int line=0; line<ir.code.Length; line++)
 			if(ports[line] != null)
 				for(int i=0; i<ports[line].Length; i++)
 					if((ports[line][i].type & 2) != 0)
-						mutableSymbols.Add(ir.irCode[line].args[i]); // out ports are mutable
+						mutableSymbols.Add(ir.code[line].args[i]); // out ports are mutable
 		foreach(var eventEntry in eventFromEntry.Values)
 			foreach(var symbol in eventEntry.symbolNames)
 				mutableSymbols.Add(symbol); // event inputs are mutable

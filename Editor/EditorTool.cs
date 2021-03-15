@@ -23,8 +23,10 @@ public class EditorTool {
 	static void GenerateCode(UdonProgramAsset programAsset) {
 		var outputPath = Path.Combine("Temp", "UdonFlat", $"{programAsset.name}.cs");
 		var program = programAsset.SerializedProgramAsset.RetrieveProgram();
+		var timer = new System.Diagnostics.Stopwatch();
+		timer.Start();
 		GenerateCode(program, outputPath);
-		Debug.Log($"code generated at {outputPath}");
+		Debug.Log($"[<color=#0c824c>UdonFlat</color>] Code generation finished in {timer.Elapsed.ToString(@"ss\.ff")}");
 		UnityEditorInternal.InternalEditorUtility.OpenFileAtLineExternal(outputPath, -1);
 	}
 	static void GenerateCode(IUdonProgram program, string outputPath) {

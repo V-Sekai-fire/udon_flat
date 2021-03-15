@@ -1,10 +1,8 @@
 using UnityEngine;
-using UnityEditor;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using VRC.Udon.Common.Interfaces;
-using VRC.Udon.Editor;
 
 namespace UdonFlat {
 public enum JumpType {
@@ -21,22 +19,22 @@ public class CtrlFlow {
 	public string[] entries;
 	public bool[] entryContinue;
 	void MarkEntries() {
-		entries = new string[ir.irCode.Length];
+		entries = new string[ir.code.Length];
 		foreach(var name in program.EntryPoints.GetSymbols()) {
 			var addr = program.EntryPoints.GetAddressFromSymbol(name);
-			entries[ir.irLineFromAddr[$"0x{addr:X8}"]] = name;
+			entries[ir.lineFromAddr[IRGen.FormatAddr(addr)]] = name;
 		}
-		foreach(var instr in ir.irCode)
+		foreach(var instr in ir.code)
 			if(instr.opcode == Opcode.CALL) {
-				var callLine = ir.irLineFromAddr[instr.arg0];
+				var callLine = ir.lineFromAddr[instr.arg0];
 				if(entries[callLine] == null)
 					entries[callLine] = "";
 			}
 
-		entryContinue = new bool[ir.irCode.Length];
+		entryContinue = new bool[ir.code.Length];
 		var entryName = "Init";
 		var entryId = 0;
-		for(int line=0; line<ir.irCode.Length; line++)
+		for(int line=0; line<ir.code.Length; line++)
 			if(entries[line] == "") {
 				entries[line] = $"{entryName}_{entryId}";
 				entryId ++;
@@ -51,10 +49,10 @@ public class CtrlFlow {
 
 	public int[] loopBegin;
 	void LocateLoops() {
-		loopBegin = new int[ir.irCode.Length];
-		for(int line=ir.irCode.Length-1; line>=0; line--)
-			if(ir.irCode[line].opcode == Opcode.JUMP) {
-				var jumpLine = ir.irLineFromAddr[ir.irCode[line].arg0];
+		loopBegin = new int[ir.code.Length];
+		for(int line=ir.code.Length-1; line>=0; line--)
+			if(ir.code[line].opcode == Opcode.JUMP) {
+				var jumpLine = ir.lineFromAddr[ir.code[line].arg0];
 				if(jumpLine <= line) {
 					var level = 0;
 					for(int i=line; i>jumpLine && level>=0; i--) 
@@ -69,14 +67,14 @@ public class CtrlFlow {
 
 	public int[] choiceEnd;
 	void LocateChoices() {
-		choiceEnd = new int[ir.irCode.Length];
-		for(int line=0; line<ir.irCode.Length; line++)
-			if(ir.irCode[line].opcode == Opcode.JUMP) {
-				var jumpLine = ir.irLineFromAddr[ir.irCode[line].arg0];
+		choiceEnd = new int[ir.code.Length];
+		for(int line=0; line<ir.code.Length; line++)
+			if(ir.code[line].opcode == Opcode.JUMP) {
+				var jumpLine = ir.lineFromAddr[ir.code[line].arg0];
 				if(jumpLine > line) {
 					var type = JumpType.If;
 					var level = 0;
-					if(line+1 < jumpLine && choiceEnd[line+1] == 1 && ir.irCode[line].args == null) {
+					if(line+1 < jumpLine && choiceEnd[line+1] == 1 && ir.code[line].args == null) {
 						type = JumpType.Else;
 						level = 1;
 					}
@@ -100,16 +98,16 @@ public class CtrlFlow {
 
 	void LocateBreaks() {
 		var loops = new Stack<int>();
-		for(int line=ir.irCode.Length-1; line>=0; line--) {
-			if(ir.irCode[line].opcode == Opcode.JUMP) {
+		for(int line=ir.code.Length-1; line>=0; line--) {
+			if(ir.code[line].opcode == Opcode.JUMP) {
 				if(jumpTypes[line] == JumpType.Loop)
 					loops.Push(line);
 				else if(jumpTypes[line] == JumpType.None && loops.Count>0) {
-					var jumpLine = ir.irLineFromAddr[ir.irCode[line].arg0];
+					var jumpLine = ir.lineFromAddr[ir.code[line].arg0];
 					var loopLine = loops.Peek();
 					if(jumpLine == loopLine+1)
 						jumpTypes[line] = JumpType.Break;
-					else if(jumpLine == ir.irLineFromAddr[ir.irCode[loopLine].arg0])
+					else if(jumpLine == ir.lineFromAddr[ir.code[loopLine].arg0])
 						jumpTypes[line] = JumpType.Continue;
 				}
 			}
@@ -120,10 +118,10 @@ public class CtrlFlow {
 
 	public string[] labels;
 	void MarkLabels() {
-		labels = new string[ir.irCode.Length];
-		foreach(var instr in ir.irCode)
-			if(instr.opcode == Opcode.JUMP && jumpTypes[ir.irLineFromAddr[instr.addr]] == JumpType.None) {
-				var jumpLine = ir.irLineFromAddr[instr.arg0];
+		labels = new string[ir.code.Length];
+		foreach(var instr in ir.code)
+			if(instr.opcode == Opcode.JUMP && jumpTypes[ir.lineFromAddr[instr.addr]] == JumpType.None) {
+				var jumpLine = ir.lineFromAddr[instr.arg0];
 				if(labels[jumpLine] == null)
 					labels[jumpLine] = $"label_{jumpLine}";
 			}
@@ -132,7 +130,7 @@ public class CtrlFlow {
 	public void Analyze() {
 		MarkEntries();
 
-		jumpTypes = new JumpType[ir.irCode.Length];
+		jumpTypes = new JumpType[ir.code.Length];
 		LocateLoops();
 		LocateChoices();
 		LocateBreaks();
