@@ -19,5 +19,7 @@ UdonSharp is currently not required.
 
 - Import this project into your Assets folder.
 - Select a Udon asset, for example, a Udon graph.
-- Click `UdonFlat/GenerateCode` from menu.
+- Click `UdonFlat/GenerateCode` from top menu or inspector dropdown.
 - A text file of generated code will pop up.
+
+![guide](../../wikis/uploads/dd194998e47d329a2dcd39e30cedb81e/guide.png)
