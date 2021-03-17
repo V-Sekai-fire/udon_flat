@@ -8,7 +8,7 @@ using VRC.Udon.Editor.ProgramSources;
 
 namespace UdonFlat {
 public class EditorTool {
-	[MenuItem("UdonFlat/GenerateCode", false, 100)]
+	[MenuItem("UdonFlat/Generate C# Code", false, 100)]
 	public static void GenerateCode() {
 		var programAsset = Selection.activeObject as UdonProgramAsset;
 		if(programAsset)
@@ -16,7 +16,7 @@ public class EditorTool {
 		else
 			Debug.LogError("Please select a UdonProgramAsset");
 	}
-	[MenuItem("CONTEXT/UdonProgramAsset/GenerateCode")]
+	[MenuItem("CONTEXT/UdonProgramAsset/Generate C# Code")]
 	static void GenerateCode(MenuCommand command) {
 		GenerateCode((UdonProgramAsset)command.context);
 	}

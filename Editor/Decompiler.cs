@@ -358,11 +358,14 @@ public class Decompiler {
 	}
 
 	public void GenerateCode(System.IO.TextWriter writer) {
+		var updateOrder = program.UpdateOrder;
 		var symbolFromIdentifier = new Dictionary<string, Symbol>();
 		foreach(var symbol in symbols)
 			symbolFromIdentifier[symbol.ToString()] = symbol;
 
 		using(var indentWriter = new IndentedTextWriter(writer, "\t")) {
+			if(updateOrder != default)
+				indentWriter.WriteLine($"[UnityEngine.DefaultExecutionOrder({updateOrder})]");
 			indentWriter.WriteLine($"public class {name} : UdonSharp.UdonSharpBehaviour {{");
 			indentWriter.Indent ++;
 
