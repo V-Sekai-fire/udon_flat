@@ -53,7 +53,7 @@ public class IRGen {
 				stack.Push(name);
 			} else if(opcode == "COPY") {
 				var targetName = stack.Pop();
-				var sourceName = stack.Pop();
+				var sourceName = stack.Count > 0 ? stack.Pop() : null;
 				if(sourceName != targetName) // optimization: skip no-op
 					translated[line] = new Instruction{addr=addr, // express COPY as EXTERN
 						opcode=Opcode.EXTERN, arg0=StatGen.COPY, args=new[]{sourceName, targetName}};
@@ -66,13 +66,13 @@ public class IRGen {
 				translated[line] = new Instruction{addr=addr, opcode=Opcode.EXTERN, arg0=signature, args=paramNames};
 			} else if(opcode == "JUMP" || opcode == "JUMP_IF_FALSE") {
 				var jumpAddr = instr[2];
-				// match CALL pattern {PUSH label; JUMP xxx; label:}
-				var isCall = opcode == "JUMP" && nextLine < asm.code.Length && asm.code[prevLine][1] == "PUSH"
+				// match CALL pattern {PUSH label; ....; JUMP xxx; label:}
+				var isCall = opcode == "JUMP" && nextLine < asm.code.Length && stack.Count > 0
 					&& ParseAddr(asm.code[nextLine][0]).Equals(
-						program.Heap.GetHeapVariable(ParseAddr(asm.code[prevLine][2])));
+						program.Heap.GetHeapVariable(program.SymbolTable.GetAddressFromSymbol(stack.Peek())));
 				if(isCall) {
 					translated[line] = new Instruction{addr=addr, opcode=Opcode.CALL, arg0=jumpAddr};
-					Translate(asm.lineFromAddr[jumpAddr], new Stack<string>(stack)); // explore hidden entry point
+					Translate(asm.lineFromAddr[jumpAddr], Clone(stack)); // explore hidden entry point
 					stack.Pop();
 				} else {
 					var cond = opcode == "JUMP_IF_FALSE" ? new[]{stack.Pop()} : null;
@@ -86,7 +86,7 @@ public class IRGen {
 						if(cond == null)
 							nextLine = jumpLine;
 						else
-							Translate(jumpLine, new Stack<string>(stack)); // explore branch
+							Translate(jumpLine, Clone(stack)); // explore branch
 					}
 				}
 			} else if(opcode == "JUMP_INDIRECT") {
@@ -105,6 +105,9 @@ public class IRGen {
 			prevLine = line;
 			line = nextLine;
 		}
+	}
+	static Stack<string> Clone(Stack<string> stack) {
+		return new Stack<string>(stack.Reverse());
 	}
 
 	public Instruction[] code;
