@@ -46,6 +46,7 @@ public class StatGen {
 		{UdonNodeParameter.ParameterType.IN_OUT, FieldDirection.Ref},
 	};
 	public static string COPY = "Get_Variable";
+	public static string UInt32Array_Get = "SystemUInt32Array.__Get__SystemInt32__SystemUInt32";
 	public static string PatchOperator(string code) {
 		return Regex.Replace(code, $@"[<>|](\s*)({string.Join("|", operatorStrTypes.Keys)})(?=\()",
 			m => operatorStrTypes[m.Groups[2].Value].Item1 + m.Groups[1].Value);

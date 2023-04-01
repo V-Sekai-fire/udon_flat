@@ -10,6 +10,7 @@ public enum Opcode {
 	EXTERN, // arg0: signature, args: parameters
 	CALL, // arg0: address
 	JUMP, // arg0: address, args: falseCond
+	SWITCH, // arg0: addressTable, args: index
 	EXIT, RETURN, // args: falseCond
 }
 public class Instruction {
@@ -33,13 +34,17 @@ public class IRGen {
 		visited = new bool[asm.code.Length];
 		translated = new Instruction[asm.code.Length];
 		foreach(var name in program.EntryPoints.GetSymbols())
-			Translate(asm.lineFromAddr[FormatAddr(program.EntryPoints.GetAddressFromSymbol(name))],
-				new Stack<string>());
+			Translate(asm.lineFromAddr[FormatAddr(program.EntryPoints.GetAddressFromSymbol(name))]);
 	}
-	void Translate(int line, Stack<string> stack) {
+	void Translate(int line, Stack<string> stack=null) {
+		var stackCloned = false;
 		var prevLine = line;
 		while(line < asm.code.Length && !visited[line]) {
 			visited[line] = true;
+			if(!stackCloned) {
+				stack = stack == null ? new Stack<string>() : new Stack<string>(stack.Reverse());
+				stackCloned = true;
+			}
 
 			var instr = asm.code[line];
 			var addr = instr[0];
@@ -53,7 +58,7 @@ public class IRGen {
 				stack.Push(name);
 			} else if(opcode == "COPY") {
 				var targetName = stack.Pop();
-				var sourceName = stack.Count > 0 ? stack.Pop() : null;
+				var sourceName = stack.Pop();
 				if(sourceName != targetName) // optimization: skip no-op
 					translated[line] = new Instruction{addr=addr, // express COPY as EXTERN
 						opcode=Opcode.EXTERN, arg0=StatGen.COPY, args=new[]{sourceName, targetName}};
@@ -72,7 +77,7 @@ public class IRGen {
 						program.Heap.GetHeapVariable(program.SymbolTable.GetAddressFromSymbol(stack.Peek())));
 				if(isCall) {
 					translated[line] = new Instruction{addr=addr, opcode=Opcode.CALL, arg0=jumpAddr};
-					Translate(asm.lineFromAddr[jumpAddr], Clone(stack)); // explore hidden entry point
+					Translate(asm.lineFromAddr[jumpAddr], stack); // explore hidden entry point
 					stack.Pop();
 				} else {
 					var cond = opcode == "JUMP_IF_FALSE" ? new[]{stack.Pop()} : null;
@@ -86,18 +91,30 @@ public class IRGen {
 						if(cond == null)
 							nextLine = jumpLine;
 						else
-							Translate(jumpLine, Clone(stack)); // explore branch
+							Translate(jumpLine, stack); // explore branch
 					}
 				}
 			} else if(opcode == "JUMP_INDIRECT") {
 				var jumpName = instr[2];
-				// match RETURN pattern {PUSH addr; COPY; JUMP_INDIRECT addr}
-				var isReturn = asm.code[prevLine][1] == "COPY" && translated[prevLine] != null
-					&& translated[prevLine].args[1] == jumpName;
-				if(isReturn)
-					translated[prevLine] = null;
-				Debug.Assert(isReturn);
-				translated[line] = new Instruction{addr=addr, opcode=Opcode.RETURN};
+				var prevInstr = translated[prevLine];
+				var isExternOutput = prevInstr != null && prevInstr.opcode == Opcode.EXTERN
+					&& prevInstr.args.Length > 0 && prevInstr.args[prevInstr.args.Length-1] == jumpName;
+				if(isExternOutput) {
+					if(prevInstr.arg0 == StatGen.COPY) {
+						// match RETURN pattern {PUSH addr; COPY; JUMP_INDIRECT addr}
+						translated[line] = new Instruction{addr=addr, opcode=Opcode.RETURN};
+					} else if(prevInstr.arg0 == StatGen.UInt32Array_Get) {
+						// match SWITCH pattern {PUSH table; PUSH index; PUSH addr; EXTERN SystemUInt32Array.__Get__SystemInt32__SystemUInt32; JUMP_INDIRECT addr}
+						translated[line] = new Instruction{addr=addr, opcode=Opcode.SWITCH,
+							arg0=prevInstr.args[0], args=new[]{prevInstr.args[1]}};
+						var table = (uint[])program.Heap.GetHeapVariable(program.SymbolTable.GetAddressFromSymbol(prevInstr.args[0]));
+						foreach(var x in table)
+							if(asm.lineFromAddr.TryGetValue(FormatAddr(x), out var jumpLine))
+								Translate(jumpLine, stack);
+					}
+				}
+				Debug.Assert(translated[line] != null);
+				translated[prevLine] = null;
 				return;
 			} else {
 				Debug.Assert(opcode == "NOP" || opcode == "ANNOTATION");
@@ -105,9 +122,6 @@ public class IRGen {
 			prevLine = line;
 			line = nextLine;
 		}
-	}
-	static Stack<string> Clone(Stack<string> stack) {
-		return new Stack<string>(stack.Reverse());
 	}
 
 	public Instruction[] code;
